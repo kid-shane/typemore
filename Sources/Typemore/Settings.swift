@@ -185,6 +185,18 @@ struct AppSettings: Codable, Equatable {
         self.customStyle = try container.decodeIfPresent(String.self, forKey: .customStyle) ?? AppSettings.defaultCustomStyle
         self.systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt) ?? AppSettings.defaultSystemPrompt
     }
+
+    /// API Key 不写入 settings.json，改由 Keychain 保存。
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(serviceName, forKey: .serviceName)
+        try container.encode(endpoint, forKey: .endpoint)
+        try container.encode(model, forKey: .model)
+        try container.encode(defaultMode, forKey: .defaultMode)
+        try container.encode(customStyle, forKey: .customStyle)
+        try container.encode(systemPrompt, forKey: .systemPrompt)
+    }
 }
 
 @MainActor
@@ -209,16 +221,29 @@ final class SettingsStore: ObservableObject {
         for url in [primaryFileURL, fallbackFileURL] {
             do {
                 let data = try Data(contentsOf: url)
-                return try JSONDecoder().decode(AppSettings.self, from: data).sanitized()
+                var loaded = try JSONDecoder().decode(AppSettings.self, from: data).sanitized()
+                let keychainKey = KeychainStore.loadAPIKey()
+                if !keychainKey.isEmpty {
+                    // Keychain 是 API Key 的权威来源。
+                    loaded.apiKey = keychainKey
+                } else if !loaded.apiKey.isEmpty {
+                    // 旧版本把 key 明文存在 JSON：迁移到 Keychain，并重写不含 key 的 JSON。
+                    KeychainStore.saveAPIKey(loaded.apiKey)
+                    try? rewriteWithoutAPIKey(loaded, at: url)
+                }
+                return loaded
             } catch {
                 continue
             }
         }
-        return AppSettings.defaults
+        var defaults = AppSettings.defaults
+        defaults.apiKey = KeychainStore.loadAPIKey()
+        return defaults
     }
 
     func save(_ next: AppSettings) throws {
         let sanitized = next.sanitized()
+        KeychainStore.saveAPIKey(sanitized.apiKey)
         let data = try JSONEncoder.pretty.encode(sanitized)
 
         do {
@@ -229,6 +254,11 @@ final class SettingsStore: ObservableObject {
         }
 
         settings = sanitized
+    }
+
+    private func rewriteWithoutAPIKey(_ settings: AppSettings, at url: URL) throws {
+        let data = try JSONEncoder.pretty.encode(settings)
+        try write(data, to: url)
     }
 
     private func write(_ data: Data, to url: URL) throws {
