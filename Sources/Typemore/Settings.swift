@@ -13,7 +13,7 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
         case .volcengine: return "火山方舟"
         case .demo: return "Demo"
         case .openai: return "OpenAI"
-        case .compatible: return "OpenAI Compatible"
+        case .compatible: return "其他 OpenAI 兼容服务"
         }
     }
 
@@ -21,7 +21,7 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .volcengine: return "https://ark.cn-beijing.volces.com/api/coding/v3"
         case .openai: return "https://api.openai.com/v1/responses"
-        case .compatible: return "https://api.openai.com/v1"
+        case .compatible: return ""
         case .demo: return ""
         }
     }
@@ -29,7 +29,8 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
     var defaultModel: String {
         switch self {
         case .volcengine: return "deepseek-v4-pro"
-        case .openai, .compatible: return "gpt-4.1-mini"
+        case .openai: return "gpt-4.1-mini"
+        case .compatible: return ""
         case .demo: return ""
         }
     }
@@ -121,7 +122,7 @@ struct AppSettings: Codable, Equatable {
     func sanitized() -> AppSettings {
         var copy = self
         if copy.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            copy.serviceName = Provider.volcengine.displayName
+            copy.serviceName = copy.provider.displayName
         }
         if copy.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             copy.endpoint = copy.provider.defaultEndpoint

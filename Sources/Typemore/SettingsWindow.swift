@@ -67,7 +67,10 @@ struct SettingsView: View {
             }
             .padding(28)
         }
-        .onAppear { refreshPermissionStatus() }
+        .onAppear {
+            normalizeProviderSelectionIfNeeded()
+            refreshPermissionStatus()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionStatus()
         }
@@ -96,12 +99,52 @@ struct SettingsView: View {
 
     private var providerCard: some View {
         SettingsCard(title: "Model Service") {
-            VStack(spacing: 14) {
-                SettingsField(title: "服务名称", text: $draft.serviceName, placeholder: "火山方舟")
-                SettingsField(title: "Base URL", text: $draft.endpoint, placeholder: "https://...")
-                SettingsField(title: "Model", text: $draft.model, placeholder: "model name")
+            VStack(alignment: .leading, spacing: 14) {
+                ServiceTypeSelector(selection: $draft.provider)
+                    .onChange(of: draft.provider) { provider in
+                        applyProviderDefaults(provider)
+                    }
+                Text(providerHelpText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(SettingsTheme.secondaryText)
+                    .lineSpacing(2)
+                SettingsField(title: "Base URL", text: $draft.endpoint, placeholder: providerEndpointPlaceholder)
+                SettingsField(title: "Model", text: $draft.model, placeholder: providerModelPlaceholder)
                 SettingsField(title: "API Key", text: $draft.apiKey, placeholder: "sk-...", isSecure: true)
             }
+        }
+    }
+
+    private var providerHelpText: String {
+        switch draft.provider {
+        case .volcengine:
+            return "适合使用火山方舟的用户，已预填默认 Base URL 和推荐模型。"
+        case .compatible:
+            return "适合 DeepSeek、OpenRouter、Moonshot、硅基流动等支持 OpenAI 兼容接口的服务。"
+        case .demo, .openai:
+            return ""
+        }
+    }
+
+    private var providerEndpointPlaceholder: String {
+        switch draft.provider {
+        case .volcengine:
+            return Provider.volcengine.defaultEndpoint
+        case .compatible:
+            return "例如 https://api.deepseek.com/v1"
+        case .demo, .openai:
+            return "https://..."
+        }
+    }
+
+    private var providerModelPlaceholder: String {
+        switch draft.provider {
+        case .volcengine:
+            return Provider.volcengine.defaultModel
+        case .compatible:
+            return "例如 deepseek-chat"
+        case .demo, .openai:
+            return "model name"
         }
     }
 
@@ -206,16 +249,19 @@ struct SettingsView: View {
 
     private func save() {
         do {
-            draft.provider = .volcengine
+            if ![Provider.volcengine, .compatible].contains(draft.provider) {
+                draft.provider = .compatible
+            }
+            draft.serviceName = draft.provider.displayName
             draft.defaultMode = selectedStyle == .custom ? .custom : .clear
             if draft.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.serviceName = Provider.volcengine.displayName
+                draft.serviceName = draft.provider.displayName
             }
             if draft.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.endpoint = Provider.volcengine.defaultEndpoint
+                draft.endpoint = draft.provider.defaultEndpoint
             }
             if draft.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.model = Provider.volcengine.defaultModel
+                draft.model = draft.provider.defaultModel
             }
             try store.save(draft)
             status = "已保存"
@@ -231,6 +277,18 @@ struct SettingsView: View {
         draft = AppSettings.defaults
         selectedStyle = .default
         save()
+    }
+
+    private func normalizeProviderSelectionIfNeeded() {
+        guard ![Provider.volcengine, .compatible].contains(draft.provider) else { return }
+        draft.provider = .compatible
+        draft.serviceName = Provider.compatible.displayName
+    }
+
+    private func applyProviderDefaults(_ provider: Provider) {
+        draft.serviceName = provider.displayName
+        draft.endpoint = provider.defaultEndpoint
+        draft.model = provider.defaultModel
     }
 }
 
@@ -391,6 +449,30 @@ private struct SettingsEditor: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(SettingsTheme.stroke, lineWidth: 1)
             )
+        }
+    }
+}
+
+private struct ServiceTypeSelector: View {
+    @Binding var selection: Provider
+
+    private let options: [Provider] = [.volcengine, .compatible]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("服务类型")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsTheme.secondaryText)
+            HStack(spacing: 8) {
+                ForEach(options) { provider in
+                    SegmentButton(
+                        title: provider.displayName,
+                        isSelected: selection == provider
+                    ) {
+                        selection = provider
+                    }
+                }
+            }
         }
     }
 }

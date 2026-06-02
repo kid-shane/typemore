@@ -60,7 +60,7 @@ final class RewriteService {
             ],
             temperature: 0.2,
             maxTokens: maxOutputTokens(for: text),
-            thinking: ThinkingConfig(type: "disabled")
+            thinking: settings.provider == .volcengine ? ThinkingConfig(type: "disabled") : nil
         )
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -269,7 +269,7 @@ private struct ChatRequest: Encodable {
     let messages: [ChatMessage]
     let temperature: Double
     let maxTokens: Int
-    let thinking: ThinkingConfig
+    let thinking: ThinkingConfig?
 
     enum CodingKeys: String, CodingKey {
         case model
