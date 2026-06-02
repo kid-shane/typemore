@@ -5,31 +5,18 @@ import SwiftUI
 final class CapsuleModel: ObservableObject {
     @Published var state: CapsuleState = .loading("读取中")
     var undoAction: (() -> Void)?
-    var settingsAction: (() -> Void)?
 }
 
 enum CapsuleState: Equatable {
     case loading(String)
     case done
     case undone
-    case error(String, needsAccessibility: Bool)
 
     var title: String {
         switch self {
         case .loading(let title): return title
         case .done: return "已改写"
         case .undone: return "已撤回"
-        case .error(let message, let needsAccessibility):
-            return needsAccessibility ? message.permissionErrorTitle : message.compactError
-        }
-    }
-
-    var preferredWidth: CGFloat {
-        switch self {
-        case .loading, .done, .undone:
-            return 132
-        case .error(_, let needsAccessibility):
-            return needsAccessibility ? 196 : 172
         }
     }
 
@@ -44,19 +31,13 @@ enum CapsuleState: Equatable {
     }
 
     var showAction: Bool {
-        switch self {
-        case .done: return true
-        case .error(_, let needsAccessibility): return needsAccessibility
-        default: return false
-        }
+        if case .done = self { return true }
+        return false
     }
 
     var actionTitle: String {
-        switch self {
-        case .done: return "撤回"
-        case .error(_, let needsAccessibility): return needsAccessibility ? "打开" : ""
-        default: return ""
-        }
+        if case .done = self { return "撤回" }
+        return ""
     }
 }
 
@@ -99,13 +80,6 @@ final class CapsuleController {
         hide(after: 0.9)
     }
 
-    func showError(_ message: String, needsAccessibility: Bool, openSettings: @escaping () -> Void) {
-        model.settingsAction = openSettings
-        model.state = .error(message, needsAccessibility: needsAccessibility)
-        show()
-        hide(after: needsAccessibility ? 6.0 : 2.4)
-    }
-
     func hide(after seconds: TimeInterval = 4.2) {
         let token = visibilityToken
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
@@ -116,7 +90,7 @@ final class CapsuleController {
 
     private func show() {
         visibilityToken += 1
-        panel.setContentSize(NSSize(width: model.state.preferredWidth, height: 30))
+        panel.setContentSize(NSSize(width: 132, height: 30))
         positionBottomCenter()
         panel.orderFrontRegardless()
     }
@@ -153,25 +127,20 @@ struct CapsuleView: View {
                 }
                 if model.state.showAction {
                     Button(model.state.actionTitle) {
-                        if case .done = model.state {
-                            model.undoAction?()
-                        } else {
-                            model.settingsAction?()
-                        }
+                        model.undoAction?()
                     }
                     .buttonStyle(CapsuleActionButtonStyle())
                 }
             }
         }
         .padding(.horizontal, 10)
-        .frame(width: model.state.preferredWidth, height: 30)
+        .frame(width: 132, height: 30)
         .foregroundStyle(foregroundColor)
         .background(background)
     }
 
     private var foregroundColor: Color {
-        if case .error = model.state { return Color(red: 1, green: 0.71, blue: 0.71) }
-        return Color(red: 0.92, green: 1.0, blue: 0.95)
+        Color(red: 0.92, green: 1.0, blue: 0.95)
     }
 
     private var background: some View {
@@ -273,20 +242,4 @@ struct CapsuleActionButtonStyle: ButtonStyle {
 
 private extension Color {
     static let typemoreGreen = Color(red: 0.27, green: 0.96, blue: 0.61)
-}
-
-private extension String {
-    var compactError: String {
-        count > 18 ? String(prefix(18)) + "..." : self
-    }
-
-    var permissionErrorTitle: String {
-        if contains("输入监控") {
-            return "开启输入监控权限"
-        }
-        if contains("辅助功能") {
-            return "开启辅助功能权限"
-        }
-        return compactError
-    }
 }

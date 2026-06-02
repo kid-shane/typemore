@@ -11,6 +11,7 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
     private let textService = SystemTextService()
     private let rewriteService = RewriteService()
     private let capsule = CapsuleController()
+    private let toast = ToastController()
     private var isProcessing = false
     private var activeSession: ActiveSession?
     private let debugEnabled = ProcessInfo.processInfo.environment["TYPEMORE_DEBUG"] == "1"
@@ -22,9 +23,28 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
         TMLog.boot("launch path=\(Bundle.main.bundleURL.path) trusted=\(accessibilityTrusted) listenEvent=\(CGPreflightListenEventAccess())")
         NSApp.setActivationPolicy(.accessory)
         debugLog("activationPolicy set to accessory")
+        installEditMenu()
         createStatusItem()
         registerTrigger()
         showSettingsOnLaunchIfNeeded()
+    }
+
+    /// 状态栏应用没有默认主菜单，导致设置窗口里的 Cmd+C/V/X/A 失效（只能右键）。
+    /// 这里补一个标准「编辑」菜单，让系统能把这些快捷键分发到当前输入框。
+    private func installEditMenu() {
+        let mainMenu = NSMenu()
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        NSApp.mainMenu = mainMenu
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -69,9 +89,7 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
             debugLog("right option double tap trigger failed: \(error.localizedDescription)")
             let message = error.localizedDescription
             TMLog.write("trigger register failed: \(message)")
-            capsule.showError(message, needsAccessibility: isPermissionError(message)) { [weak self] in
-                self?.openPermissionSettings(for: message)
-            }
+            showErrorToast(message)
         }
     }
 
@@ -132,9 +150,8 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
             } catch {
                 let message = error.localizedDescription
                 TMLog.write("flow error: \(message)")
-                capsule.showError(message, needsAccessibility: isPermissionError(message)) { [weak self] in
-                    self?.openPermissionSettings(for: message)
-                }
+                capsule.hide(after: 0)
+                showErrorToast(message)
             }
         }
     }
@@ -147,9 +164,18 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
             capsule.showUndone()
         } catch {
             let message = error.localizedDescription
-            capsule.showError(message, needsAccessibility: isPermissionError(message)) { [weak self] in
+            capsule.hide(after: 0)
+            showErrorToast(message)
+        }
+    }
+
+    private func showErrorToast(_ message: String) {
+        if isPermissionError(message) {
+            toast.showError(message, actionTitle: "打开设置") { [weak self] in
                 self?.openPermissionSettings(for: message)
             }
+        } else {
+            toast.showError(message)
         }
     }
 

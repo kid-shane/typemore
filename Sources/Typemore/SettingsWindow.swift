@@ -68,6 +68,9 @@ struct SettingsView: View {
             .padding(28)
         }
         .onAppear { refreshPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissionStatus()
+        }
         .onReceive(store.$settings) { draft = $0 }
         .onReceive(store.$settings) { settings in
             selectedStyle = settings.defaultMode == .custom ? .custom : .default
@@ -136,16 +139,47 @@ struct SettingsView: View {
                     granted: inputMonitoringGranted,
                     openAction: { SystemTextService().openInputMonitoringSettings() }
                 )
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("只在你双击右 Option 时读取文本。")
-                    Text("目标文本和必要上下文会发送到你配置的模型服务。")
-                    Text("部分应用会临时使用系统剪贴板，用完即恢复。")
+                if hasMissingPermission {
+                    permissionRepairTip
                 }
-                .font(.system(size: 12))
-                .foregroundStyle(SettingsTheme.secondaryText)
-                .lineSpacing(2)
             }
         }
+    }
+
+    private var hasMissingPermission: Bool {
+        !accessibilityGranted || !inputMonitoringGranted
+    }
+
+    private var permissionRepairTip: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "lightbulb")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsTheme.green.opacity(0.95))
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("如果这里显示未开启，但你已经在 macOS 里打开过")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(SettingsTheme.primaryText)
+                Text("请按这几步修复：1. 点下方对应权限的「打开」；2. 在「系统设置 > 隐私与安全性 > 辅助功能/输入监控」里，先把 Typemore 从列表中移除，再重新添加并打开；3. 完全退出 Typemore 后重新打开。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SettingsTheme.secondaryText)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("刷新状态") {
+                    refreshPermissionStatus()
+                }
+                .buttonStyle(InlineSettingsButtonStyle())
+                .padding(.top, 2)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(SettingsTheme.green.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(SettingsTheme.green.opacity(0.16), lineWidth: 1)
+        )
     }
 
     private func refreshPermissionStatus() {
@@ -479,5 +513,13 @@ private struct SecondarySettingsButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .stroke(SettingsTheme.stroke, lineWidth: 1)
             )
+    }
+}
+
+private struct InlineSettingsButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(SettingsTheme.green.opacity(configuration.isPressed ? 0.65 : 0.95))
     }
 }

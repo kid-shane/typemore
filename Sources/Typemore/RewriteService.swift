@@ -110,11 +110,27 @@ final class RewriteService {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
-            if let apiError = try? JSONDecoder().decode(APIErrorEnvelope.self, from: data), let message = apiError.error?.message {
-                throw RewriteError.api(message)
-            }
-            throw RewriteError.api("API 请求失败：\(http.statusCode)")
+            let rawMessage = (try? JSONDecoder().decode(APIErrorEnvelope.self, from: data))?.error?.message
+            throw RewriteError.api(friendlyAPIError(status: http.statusCode, rawMessage: rawMessage))
         }
+    }
+
+    private func friendlyAPIError(status: Int, rawMessage: String?) -> String {
+        let lowered = (rawMessage ?? "").lowercased()
+        if status == 401 || status == 403 || lowered.contains("unauthorized") || lowered.contains("api key") || lowered.contains("permission") {
+            return "API Key 无效或没有权限，请检查设置中的 API Key"
+        }
+        if status == 404 || lowered.contains("not found") || lowered.contains("does not exist") || (lowered.contains("model") && lowered.contains("not")) {
+            return "模型名可能不正确，请检查设置中的 Model"
+        }
+        if status == 429 || lowered.contains("rate limit") || lowered.contains("quota") {
+            return "请求过于频繁或额度不足，请稍后再试"
+        }
+        if let rawMessage, !rawMessage.isEmpty {
+            let trimmed = rawMessage.replacingOccurrences(of: "\n", with: " ")
+            return trimmed.count > 60 ? String(trimmed.prefix(60)) + "…" : trimmed
+        }
+        return "API 请求失败：\(status)"
     }
 
     private func buildInstruction(settings: AppSettings) -> String {
