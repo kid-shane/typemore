@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build universal app and DMG
+        env:
+          UNIVERSAL: "1"
+        run: bash scripts/package-local-app.sh
+
+      - name: Verify universal binary
+        run: lipo -info dist/Typemore.app/Contents/MacOS/Typemore
+
+      - name: Rename artifacts with tag
+        run: |
+          mkdir -p release-assets
+          cp "dist/Typemore-local.dmg" "release-assets/Typemore-${GITHUB_REF_NAME}-universal.dmg"
+          cp "dist/Typemore-local.zip" "release-assets/Typemore-${GITHUB_REF_NAME}-universal.zip"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/Typemore-${{ github.ref_name }}-universal.dmg
+            release-assets/Typemore-${{ github.ref_name }}-universal.zip
+          generate_release_notes: true
+          body: |
+            Typemore ${{ github.ref_name }}
+
+            Universal build for Apple Silicon and Intel Macs.
+
+            First launch on another Mac:
+            1. Open the DMG and drag Typemore.app to Applications.
+            2. Right-click Typemore.app and choose Open to bypass Gatekeeper (the app is ad-hoc signed, not notarized).
+            3. Grant Accessibility and Input Monitoring permissions in System Settings.

@@ -41,6 +41,15 @@ Typemore 采用“选区优先，光标兜底”的流程：
 
 Typemore 当前只支持 macOS。它使用 Swift、AppKit、SwiftUI、CGEventTap、Accessibility API、系统剪贴板和状态栏 API 实现。
 
+## 下载安装
+
+如果你不想自己编译，可以直接从 [GitHub Releases](https://github.com/kid-shane/typemore/releases) 下载安装包：
+
+1. 下载 `Typemore-<版本>-universal.dmg`（同时支持 Apple Silicon 和 Intel）。
+2. 打开 DMG，把 `Typemore.app` 拖到 `Applications`。
+3. 首次打开时右键 `Typemore.app` 选择「打开」，绕过 Gatekeeper（当前为 ad-hoc 签名，未做公证）。
+4. 在系统设置里为 Typemore 开启「辅助功能」和「输入监控」权限。
+
 ## 快速开始
 
 ```bash

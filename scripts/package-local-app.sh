@@ -21,13 +21,28 @@ ICON_ICNS="$RESOURCES_DIR/$APP_NAME.icns"
 
 cd "$ROOT_DIR"
 
-echo "Building release binary..."
-swift build --configuration release --disable-sandbox
+UNIVERSAL="${UNIVERSAL:-0}"
+
+if [[ "$UNIVERSAL" == "1" ]]; then
+  echo "Building universal (arm64 + x86_64) release binary..."
+  swift build --configuration release --triple arm64-apple-macosx --disable-sandbox
+  swift build --configuration release --triple x86_64-apple-macosx --disable-sandbox
+  ARM_BIN="$ROOT_DIR/.build/arm64-apple-macosx/release/$APP_NAME"
+  X86_BIN="$ROOT_DIR/.build/x86_64-apple-macosx/release/$APP_NAME"
+  UNIVERSAL_BIN="$DIST_DIR/$APP_NAME-universal"
+  mkdir -p "$DIST_DIR"
+  lipo -create "$ARM_BIN" "$X86_BIN" -output "$UNIVERSAL_BIN"
+  BINARY_PATH="$UNIVERSAL_BIN"
+else
+  echo "Building release binary..."
+  swift build --configuration release --disable-sandbox
+  BINARY_PATH="$BUILD_DIR/$APP_NAME"
+fi
 
 echo "Creating app bundle..."
 rm -rf "$APP_DIR" "$ZIP_PATH" "$DMG_ROOT" "$DMG_TEMP" "$DMG_PATH" "$ICON_PNG" "$ICONSET_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$BUILD_DIR/$APP_NAME" "$MACOS_DIR/$APP_NAME"
+cp "$BINARY_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 echo "Generating app icon..."
