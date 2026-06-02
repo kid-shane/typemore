@@ -18,6 +18,9 @@ jobs:
       - name: Show toolchain
         run: swift --version
 
+      - name: Install icon dependencies
+        run: python3 -m pip install --break-system-packages Pillow
+
       - name: Build universal app and DMG
         env:
           UNIVERSAL: "1"
