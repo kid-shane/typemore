@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import CoreGraphics
 import SwiftUI
 
 @MainActor
@@ -39,6 +41,8 @@ struct SettingsView: View {
     @State private var draft: AppSettings
     @State private var status = ""
     @State private var selectedStyle: StyleTab
+    @State private var accessibilityGranted = false
+    @State private var inputMonitoringGranted = false
 
     init(store: SettingsStore) {
         self.store = store
@@ -55,6 +59,7 @@ struct SettingsView: View {
                     VStack(spacing: 14) {
                         providerCard
                         writingCard
+                        privacyCard
                     }
                     .padding(.bottom, 4)
                 }
@@ -62,6 +67,7 @@ struct SettingsView: View {
             }
             .padding(28)
         }
+        .onAppear { refreshPermissionStatus() }
         .onReceive(store.$settings) { draft = $0 }
         .onReceive(store.$settings) { settings in
             selectedStyle = settings.defaultMode == .custom ? .custom : .default
@@ -115,6 +121,36 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private var privacyCard: some View {
+        SettingsCard(title: "Privacy & Permissions") {
+            VStack(alignment: .leading, spacing: 14) {
+                PermissionRow(
+                    title: "辅助功能",
+                    granted: accessibilityGranted,
+                    openAction: { SystemTextService().openAccessibilitySettings() }
+                )
+                PermissionRow(
+                    title: "输入监控",
+                    granted: inputMonitoringGranted,
+                    openAction: { SystemTextService().openInputMonitoringSettings() }
+                )
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("只在你双击右 Option 时读取文本。")
+                    Text("目标文本和必要上下文会发送到你配置的模型服务。")
+                    Text("部分应用会临时使用系统剪贴板，用完即恢复。")
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(SettingsTheme.secondaryText)
+                .lineSpacing(2)
+            }
+        }
+    }
+
+    private func refreshPermissionStatus() {
+        accessibilityGranted = AXIsProcessTrusted()
+        inputMonitoringGranted = CGPreflightListenEventAccess()
     }
 
     private var footer: some View {
@@ -364,6 +400,32 @@ private struct DefaultStylePreview: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(SettingsTheme.stroke, lineWidth: 1)
             )
+        }
+    }
+}
+
+private struct PermissionRow: View {
+    let title: String
+    let granted: Bool
+    let openAction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsTheme.secondaryText)
+                .frame(width: 88, alignment: .leading)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(granted ? SettingsTheme.green : SettingsTheme.error)
+                    .frame(width: 7, height: 7)
+                Text(granted ? "已开启" : "未开启")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(granted ? SettingsTheme.green : SettingsTheme.error)
+            }
+            Spacer()
+            Button("打开", action: openAction)
+                .buttonStyle(SecondarySettingsButtonStyle())
         }
     }
 }
