@@ -44,7 +44,7 @@ def env_or_setting(env_name: str, settings: dict, key: str, default: str = "") -
 def chat_completions_endpoint(base_url: str) -> str:
     value = base_url.strip().rstrip("/")
     if not value:
-        value = "https://ark.cn-beijing.volces.com/api/coding/v3"
+        value = "https://ark.cn-beijing.volces.com/api/v3"
     if value.endswith("/chat/completions"):
         return value
     return f"{value}/chat/completions"
@@ -141,7 +141,7 @@ def main() -> int:
     args = parser.parse_args()
 
     settings = load_settings()
-    base_url = env_or_setting("TYPEMORE_BASE_URL", settings, "endpoint", "https://ark.cn-beijing.volces.com/api/coding/v3")
+    base_url = env_or_setting("TYPEMORE_BASE_URL", settings, "endpoint", "https://ark.cn-beijing.volces.com/api/v3")
     model = env_or_setting("TYPEMORE_MODEL", settings, "model", "deepseek-v4-pro")
     api_key = env_or_setting("TYPEMORE_API_KEY", settings, "apiKey")
     text = read_text(args)

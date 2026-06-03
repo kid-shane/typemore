@@ -104,10 +104,18 @@ struct SettingsView: View {
                     .onChange(of: draft.provider) { provider in
                         applyProviderDefaults(provider)
                     }
+                if draft.provider == .volcengine {
+                    VolcengineEndpointSelector(selection: $draft.volcengineEndpointKind)
+                        .onChange(of: draft.volcengineEndpointKind) { kind in
+                            applyVolcengineEndpointDefaults(kind)
+                        }
+                }
                 Text(providerHelpText)
                     .font(.system(size: 11))
                     .foregroundStyle(SettingsTheme.secondaryText)
                     .lineSpacing(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 102)
                 SettingsField(title: "Base URL", text: $draft.endpoint, placeholder: providerEndpointPlaceholder)
                 SettingsField(title: "Model", text: $draft.model, placeholder: providerModelPlaceholder)
                 SettingsField(title: "API Key", text: $draft.apiKey, placeholder: "sk-...", isSecure: true)
@@ -118,7 +126,9 @@ struct SettingsView: View {
     private var providerHelpText: String {
         switch draft.provider {
         case .volcengine:
-            return "适合使用火山方舟的用户，已预填默认 Base URL 和推荐模型。"
+            return draft.volcengineEndpointKind == .api
+                ? "适合直接使用火山方舟 API 的用户。"
+                : "适合使用火山方舟 Coding Plan / AI 工具兼容入口的用户。"
         case .compatible:
             return "适合 DeepSeek、OpenRouter、Moonshot、硅基流动等支持 OpenAI 兼容接口的服务。"
         case .demo, .openai:
@@ -129,7 +139,7 @@ struct SettingsView: View {
     private var providerEndpointPlaceholder: String {
         switch draft.provider {
         case .volcengine:
-            return Provider.volcengine.defaultEndpoint
+            return draft.volcengineEndpointKind.defaultEndpoint
         case .compatible:
             return "例如 https://api.deepseek.com/v1"
         case .demo, .openai:
@@ -258,7 +268,7 @@ struct SettingsView: View {
                 draft.serviceName = draft.provider.displayName
             }
             if draft.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.endpoint = draft.provider.defaultEndpoint
+                draft.endpoint = draft.provider == .volcengine ? draft.volcengineEndpointKind.defaultEndpoint : draft.provider.defaultEndpoint
             }
             if draft.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 draft.model = draft.provider.defaultModel
@@ -287,8 +297,12 @@ struct SettingsView: View {
 
     private func applyProviderDefaults(_ provider: Provider) {
         draft.serviceName = provider.displayName
-        draft.endpoint = provider.defaultEndpoint
+        draft.endpoint = provider == .volcengine ? draft.volcengineEndpointKind.defaultEndpoint : provider.defaultEndpoint
         draft.model = provider.defaultModel
+    }
+
+    private func applyVolcengineEndpointDefaults(_ kind: VolcengineEndpointKind) {
+        draft.endpoint = kind.defaultEndpoint
     }
 }
 
@@ -471,6 +485,82 @@ private struct ServiceTypeSelector: View {
                     ) {
                         selection = provider
                     }
+                }
+            }
+        }
+    }
+}
+
+private struct VolcengineEndpointSelector: View {
+    @Binding var selection: VolcengineEndpointKind
+    @State private var isExpanded = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text("接入方式")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsTheme.secondaryText)
+                .frame(width: 88, alignment: .leading)
+                .padding(.top, 9)
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) { isExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(selection.displayName)
+                            .font(.system(size: 13))
+                            .foregroundColor(SettingsTheme.primaryText)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(SettingsTheme.secondaryText)
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+                    .background(SettingsTheme.field)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(SettingsTheme.stroke, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+
+                if isExpanded {
+                    VStack(spacing: 0) {
+                        ForEach(VolcengineEndpointKind.allCases) { kind in
+                            Button {
+                                selection = kind
+                                withAnimation(.easeOut(duration: 0.12)) { isExpanded = false }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text(kind.displayName)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(SettingsTheme.primaryText)
+                                    Spacer(minLength: 0)
+                                    if kind == selection {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundStyle(SettingsTheme.green)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 32)
+                                .background(kind == selection ? SettingsTheme.green.opacity(0.08) : Color.clear)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .background(SettingsTheme.field)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(SettingsTheme.stroke, lineWidth: 1)
+                    )
                 }
             }
         }

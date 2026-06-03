@@ -173,7 +173,7 @@ final class RewriteService {
 
     private func chatCompletionsEndpoint(_ endpoint: String) -> String {
         let value = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if value.isEmpty { return "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions" }
+        if value.isEmpty { return VolcengineEndpointKind.api.defaultEndpoint + "/chat/completions" }
         if value.hasSuffix("/chat/completions") { return value }
         return "\(value)/chat/completions"
     }

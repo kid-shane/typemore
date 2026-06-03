@@ -59,7 +59,7 @@ def value(settings: dict, env_name: str, key: str, default: str = "") -> str:
 
 
 def endpoint_from(base_url: str) -> str:
-    endpoint = base_url.strip().rstrip("/") or "https://ark.cn-beijing.volces.com/api/coding/v3"
+    endpoint = base_url.strip().rstrip("/") or "https://ark.cn-beijing.volces.com/api/v3"
     if endpoint.endswith("/chat/completions"):
         return endpoint
     return f"{endpoint}/chat/completions"
@@ -139,7 +139,7 @@ def main() -> int:
 
     stage_start = now()
     settings = load_settings()
-    base_url = value(settings, "TYPEMORE_BASE_URL", "endpoint", "https://ark.cn-beijing.volces.com/api/coding/v3")
+    base_url = value(settings, "TYPEMORE_BASE_URL", "endpoint", "https://ark.cn-beijing.volces.com/api/v3")
     model = value(settings, "TYPEMORE_MODEL", "model", "deepseek-v4-pro")
     api_key = value(settings, "TYPEMORE_API_KEY", "apiKey")
     text = exact_300_text()

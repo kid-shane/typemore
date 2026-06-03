@@ -19,7 +19,7 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
 
     var defaultEndpoint: String {
         switch self {
-        case .volcengine: return "https://ark.cn-beijing.volces.com/api/coding/v3"
+        case .volcengine: return "https://ark.cn-beijing.volces.com/api/v3"
         case .openai: return "https://api.openai.com/v1/responses"
         case .compatible: return ""
         case .demo: return ""
@@ -33,6 +33,31 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
         case .compatible: return ""
         case .demo: return ""
         }
+    }
+}
+
+enum VolcengineEndpointKind: String, CaseIterable, Codable, Identifiable {
+    case api
+    case codingPlan
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .api: return "方舟 API"
+        case .codingPlan: return "Coding Plan"
+        }
+    }
+
+    var defaultEndpoint: String {
+        switch self {
+        case .api: return "https://ark.cn-beijing.volces.com/api/v3"
+        case .codingPlan: return "https://ark.cn-beijing.volces.com/api/coding/v3"
+        }
+    }
+
+    static func infer(from endpoint: String) -> VolcengineEndpointKind {
+        endpoint.contains("/api/coding/v3") ? .codingPlan : .api
     }
 }
 
@@ -73,6 +98,7 @@ enum RewriteMode: String, CaseIterable, Codable, Identifiable {
 
 struct AppSettings: Codable, Equatable {
     var provider: Provider
+    var volcengineEndpointKind: VolcengineEndpointKind
     var serviceName: String
     var endpoint: String
     var model: String
@@ -110,8 +136,9 @@ struct AppSettings: Codable, Equatable {
 
     static let defaults = AppSettings(
         provider: .volcengine,
+        volcengineEndpointKind: .api,
         serviceName: Provider.volcengine.displayName,
-        endpoint: Provider.volcengine.defaultEndpoint,
+        endpoint: VolcengineEndpointKind.api.defaultEndpoint,
         model: Provider.volcengine.defaultModel,
         apiKey: "",
         defaultMode: .clear,
@@ -125,7 +152,7 @@ struct AppSettings: Codable, Equatable {
             copy.serviceName = copy.provider.displayName
         }
         if copy.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            copy.endpoint = copy.provider.defaultEndpoint
+            copy.endpoint = copy.provider == .volcengine ? copy.volcengineEndpointKind.defaultEndpoint : copy.provider.defaultEndpoint
         }
         if copy.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             copy.model = copy.provider.defaultModel
@@ -142,6 +169,7 @@ struct AppSettings: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case provider
+        case volcengineEndpointKind
         case serviceName
         case endpoint
         case model
@@ -153,6 +181,7 @@ struct AppSettings: Codable, Equatable {
 
     init(
         provider: Provider,
+        volcengineEndpointKind: VolcengineEndpointKind = .api,
         serviceName: String,
         endpoint: String,
         model: String,
@@ -162,6 +191,7 @@ struct AppSettings: Codable, Equatable {
         systemPrompt: String
     ) {
         self.provider = provider
+        self.volcengineEndpointKind = volcengineEndpointKind
         self.serviceName = serviceName
         self.endpoint = endpoint
         self.model = model
@@ -176,6 +206,7 @@ struct AppSettings: Codable, Equatable {
         self.provider = try container.decodeIfPresent(Provider.self, forKey: .provider) ?? .volcengine
         self.serviceName = try container.decodeIfPresent(String.self, forKey: .serviceName) ?? provider.displayName
         self.endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint) ?? provider.defaultEndpoint
+        self.volcengineEndpointKind = try container.decodeIfPresent(VolcengineEndpointKind.self, forKey: .volcengineEndpointKind) ?? VolcengineEndpointKind.infer(from: endpoint)
         self.model = try container.decodeIfPresent(String.self, forKey: .model) ?? provider.defaultModel
         self.apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
         if let rawDefaultMode = try container.decodeIfPresent(String.self, forKey: .defaultMode) {
@@ -191,6 +222,7 @@ struct AppSettings: Codable, Equatable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(provider, forKey: .provider)
+        try container.encode(volcengineEndpointKind, forKey: .volcengineEndpointKind)
         try container.encode(serviceName, forKey: .serviceName)
         try container.encode(endpoint, forKey: .endpoint)
         try container.encode(model, forKey: .model)
