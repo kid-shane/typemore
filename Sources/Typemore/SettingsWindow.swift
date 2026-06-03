@@ -39,6 +39,7 @@ final class SettingsWindowController {
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     @State private var draft: AppSettings
+    @State private var draftAPIKeys: [Provider: String]
     @State private var status = ""
     @State private var selectedStyle: StyleTab
     @State private var accessibilityGranted = false
@@ -47,6 +48,7 @@ struct SettingsView: View {
     init(store: SettingsStore) {
         self.store = store
         _draft = State(initialValue: store.settings)
+        _draftAPIKeys = State(initialValue: Self.loadDraftAPIKeys(current: store.settings))
         _selectedStyle = State(initialValue: store.settings.defaultMode == .custom ? .custom : .default)
     }
 
@@ -74,7 +76,10 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionStatus()
         }
-        .onReceive(store.$settings) { draft = $0 }
+        .onReceive(store.$settings) { settings in
+            draft = settings
+            draftAPIKeys[settings.provider] = settings.apiKey
+        }
         .onReceive(store.$settings) { settings in
             selectedStyle = settings.defaultMode == .custom ? .custom : .default
         }
@@ -100,10 +105,7 @@ struct SettingsView: View {
     private var providerCard: some View {
         SettingsCard(title: "Model Service") {
             VStack(alignment: .leading, spacing: 14) {
-                ServiceTypeSelector(selection: $draft.provider)
-                    .onChange(of: draft.provider) { provider in
-                        applyProviderDefaults(provider)
-                    }
+                ServiceTypeSelector(selection: providerSelection)
                 if draft.provider == .volcengine {
                     VolcengineEndpointSelector(selection: $draft.volcengineEndpointKind)
                         .onChange(of: draft.volcengineEndpointKind) { kind in
@@ -262,6 +264,8 @@ struct SettingsView: View {
             if ![Provider.volcengine, .compatible].contains(draft.provider) {
                 draft.provider = .compatible
             }
+            rememberDraftAPIKey(for: draft.provider)
+            persistDraftAPIKeys()
             draft.serviceName = draft.provider.displayName
             draft.defaultMode = selectedStyle == .custom ? .custom : .clear
             if draft.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -284,6 +288,8 @@ struct SettingsView: View {
     }
 
     private func reset() {
+        KeychainStore.deleteAllAPIKeys()
+        draftAPIKeys = [:]
         draft = AppSettings.defaults
         selectedStyle = .default
         save()
@@ -293,6 +299,49 @@ struct SettingsView: View {
         guard ![Provider.volcengine, .compatible].contains(draft.provider) else { return }
         draft.provider = .compatible
         draft.serviceName = Provider.compatible.displayName
+        draft.apiKey = apiKey(for: .compatible)
+    }
+
+    private static func loadDraftAPIKeys(current settings: AppSettings) -> [Provider: String] {
+        var keys: [Provider: String] = [:]
+        for provider in [Provider.volcengine, .compatible] {
+            keys[provider] = KeychainStore.loadAPIKey(for: provider)
+        }
+        keys[settings.provider] = settings.apiKey
+        return keys
+    }
+
+    private var providerSelection: Binding<Provider> {
+        Binding(
+            get: { draft.provider },
+            set: { switchProvider(to: $0) }
+        )
+    }
+
+    private func switchProvider(to provider: Provider) {
+        guard provider != draft.provider else { return }
+        rememberDraftAPIKey(for: draft.provider)
+        draft.provider = provider
+        draft.apiKey = apiKey(for: provider)
+        applyProviderDefaults(provider)
+    }
+
+    private func rememberDraftAPIKey(for provider: Provider) {
+        guard [Provider.volcengine, .compatible].contains(provider) else { return }
+        draftAPIKeys[provider] = draft.apiKey
+    }
+
+    private func persistDraftAPIKeys() {
+        for provider in [Provider.volcengine, .compatible] {
+            KeychainStore.saveAPIKey(draftAPIKeys[provider] ?? "", for: provider)
+        }
+    }
+
+    private func apiKey(for provider: Provider) -> String {
+        if let cached = draftAPIKeys[provider] {
+            return cached
+        }
+        return KeychainStore.loadAPIKey(for: provider)
     }
 
     private func applyProviderDefaults(_ provider: Provider) {

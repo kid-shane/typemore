@@ -255,14 +255,21 @@ final class SettingsStore: ObservableObject {
             do {
                 let data = try Data(contentsOf: url)
                 var loaded = try JSONDecoder().decode(AppSettings.self, from: data).sanitized()
-                let keychainKey = KeychainStore.loadAPIKey()
+                let keychainKey = KeychainStore.loadAPIKey(for: loaded.provider)
                 if !keychainKey.isEmpty {
                     // Keychain 是 API Key 的权威来源。
                     loaded.apiKey = keychainKey
                 } else if !loaded.apiKey.isEmpty {
                     // 旧版本把 key 明文存在 JSON：迁移到 Keychain，并重写不含 key 的 JSON。
-                    KeychainStore.saveAPIKey(loaded.apiKey)
+                    KeychainStore.saveAPIKey(loaded.apiKey, for: loaded.provider)
                     try? rewriteWithoutAPIKey(loaded, at: url)
+                } else {
+                    // 兼容 v0.1.3 及更早版本的单一 Keychain 条目。
+                    let legacyKey = KeychainStore.loadAPIKey()
+                    if !legacyKey.isEmpty {
+                        loaded.apiKey = legacyKey
+                        KeychainStore.saveAPIKey(legacyKey, for: loaded.provider)
+                    }
                 }
                 return loaded
             } catch {
@@ -270,13 +277,16 @@ final class SettingsStore: ObservableObject {
             }
         }
         var defaults = AppSettings.defaults
-        defaults.apiKey = KeychainStore.loadAPIKey()
+        defaults.apiKey = KeychainStore.loadAPIKey(for: defaults.provider)
+        if defaults.apiKey.isEmpty {
+            defaults.apiKey = KeychainStore.loadAPIKey()
+        }
         return defaults
     }
 
     func save(_ next: AppSettings) throws {
         let sanitized = next.sanitized()
-        KeychainStore.saveAPIKey(sanitized.apiKey)
+        KeychainStore.saveAPIKey(sanitized.apiKey, for: sanitized.provider)
         let data = try JSONEncoder.pretty.encode(sanitized)
 
         do {
