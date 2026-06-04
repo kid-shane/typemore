@@ -92,7 +92,7 @@ struct ClipboardSnapshot {
 
 @MainActor
 final class SystemTextService {
-    private let keyboardAllSelectionMaxCharacters = 2_000
+    private let keyboardAllSelectionMaxCharacters = 3_000
     private var nextSessionID = 0
 
     func captureText(onCopySent: @escaping (Int) -> Void) async throws -> CaptureResult {
@@ -302,11 +302,11 @@ final class SystemTextService {
     }
 
     private func shouldTryLineSelectionFallback(for bundleID: String?) -> Bool {
-        bundleID == "cn.trae.app"
+        true
     }
 
     private func shouldTryFocusedAllSelectionFallback(for bundleID: String?) -> Bool {
-        bundleID == "cn.trae.app"
+        true
     }
 
     private func copyFocusedEditableContentViaKeyboard(sessionID: Int, maxCharacters: Int) async throws -> String {
@@ -694,6 +694,7 @@ enum TypemoreError: LocalizedError {
     case appleScript(String)
     case inputTooLong(Int)
     case invalidModelResponse
+    case reasoningOnlyModelResponse
 
     var errorDescription: String? {
         switch self {
@@ -702,6 +703,7 @@ enum TypemoreError: LocalizedError {
         case .appleScript(let message): return message
         case .inputTooLong(let maxCharacters): return "当前输入框内容超过 \(maxCharacters) 字，请手动选中要改写的部分"
         case .invalidModelResponse: return "模型没有返回可用文本"
+        case .reasoningOnlyModelResponse: return "模型只返回了思考内容，请关闭思考/推理模式或选择非思考模型后重试"
         }
     }
 }

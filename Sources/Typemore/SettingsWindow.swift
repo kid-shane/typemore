@@ -121,6 +121,9 @@ struct SettingsView: View {
                 SettingsField(title: "Base URL", text: $draft.endpoint, placeholder: providerEndpointPlaceholder)
                 SettingsField(title: "Model", text: $draft.model, placeholder: providerModelPlaceholder)
                 SettingsField(title: "API Key", text: $draft.apiKey, placeholder: "sk-...", isSecure: true)
+                if draft.provider == .compatible {
+                    compatibleThinkingTip
+                }
             }
         }
     }
@@ -143,7 +146,7 @@ struct SettingsView: View {
         case .volcengine:
             return draft.volcengineEndpointKind.defaultEndpoint
         case .compatible:
-            return "例如 https://api.deepseek.com/v1"
+            return "例如 https://api.deepseek.com"
         case .demo, .openai:
             return "https://..."
         }
@@ -158,6 +161,22 @@ struct SettingsView: View {
         case .demo, .openai:
             return "model name"
         }
+    }
+
+    private var compatibleThinkingTip: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SettingsTheme.secondaryText)
+                .padding(.top, 1)
+            Text("为了更快改写，建议关闭思考/推理模式，或选择非思考模型。若开启思考，改写过程可能长达 30 秒以上。")
+                .font(.system(size: 11))
+                .foregroundStyle(SettingsTheme.secondaryText)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.leading, 102)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var writingCard: some View {
