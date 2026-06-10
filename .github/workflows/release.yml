@@ -45,9 +45,9 @@ jobs:
           body: |
             Typemore ${{ github.ref_name }}
 
-            Universal build for Apple Silicon and Intel Macs.
+            This release includes a universal build for Apple Silicon and Intel Macs.
 
-            First launch on another Mac:
-            1. Open the DMG and drag Typemore.app to Applications.
-            2. Right-click Typemore.app and choose Open to bypass Gatekeeper (the app is ad-hoc signed, not notarized).
-            3. Grant Accessibility and Input Monitoring permissions in System Settings.
+            Highlights:
+            - Added a Thinking / Reasoning Mode setting for model requests.
+            - Keeps thinking disabled by default for faster rewrite results.
+            - Automatically retries without the thinking parameter when a compatible API does not support it.
