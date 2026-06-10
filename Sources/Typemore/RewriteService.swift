@@ -53,6 +53,7 @@ final class RewriteService {
     private func rewriteWithChatCompletions(_ text: String, contextBefore: String, contextAfter: String, instruction: String, settings: AppSettings) async throws -> String {
         let startedAt = Date()
         let url = try validatedURL(chatCompletionsEndpoint(settings.endpoint))
+        let thinking = chatCompletionsThinkingConfig(settings: settings)
         let body = ChatRequest(
             model: settings.model,
             messages: [
@@ -61,17 +62,41 @@ final class RewriteService {
             ],
             temperature: 0.2,
             maxTokens: maxOutputTokens(for: text),
-            thinking: settings.provider == .volcengine ? ThinkingConfig(type: "disabled") : nil
+            thinking: thinking
         )
+
+        do {
+            let outputText = try await performChatCompletions(body: body, url: url, settings: settings)
+            perfLog("api response: \(Self.formatDuration(since: startedAt))")
+            return outputText
+        } catch {
+            guard thinking != nil, shouldRetryWithoutThinkingParameter(error) else {
+                throw error
+            }
+            TMLog.write("chat completions thinking parameter rejected, retrying without thinking field: \(error.localizedDescription)")
+            let fallbackBody = ChatRequest(
+                model: body.model,
+                messages: body.messages,
+                temperature: body.temperature,
+                maxTokens: body.maxTokens,
+                thinking: nil
+            )
+            let outputText = try await performChatCompletions(body: fallbackBody, url: url, settings: settings)
+            perfLog("api response fallback: \(Self.formatDuration(since: startedAt))")
+            return outputText
+        }
+    }
+
+    private func performChatCompletions(body: ChatRequest, url: URL, settings: AppSettings) async throws -> String {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(settings.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = requestTimeout(for: text)
+        request.timeoutInterval = requestTimeout(for: body.sourceTextForTimeout)
 
         let (data, response) = try await perform(request)
-        perfLog("api response: \(Self.formatDuration(since: startedAt)), bytes=\(data.count)")
+        perfLog("api response bytes=\(data.count), thinking=\(body.thinking?.type ?? "omitted")")
         try validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
         guard let message = decoded.choices.first?.message else {
@@ -85,6 +110,16 @@ final class RewriteService {
             throw TypemoreError.invalidModelResponse
         }
         return outputText
+    }
+
+    private func chatCompletionsThinkingConfig(settings: AppSettings) -> ThinkingConfig? {
+        guard settings.provider == .volcengine || settings.provider == .compatible else { return nil }
+        return ThinkingConfig(type: settings.thinkingEnabled ? "enabled" : "disabled")
+    }
+
+    private func shouldRetryWithoutThinkingParameter(_ error: Error) -> Bool {
+        guard case RewriteError.apiStatus(let status, _) = error else { return false }
+        return status == 400 || status == 422
     }
 
     private func rewriteWithResponses(_ text: String, contextBefore: String, contextAfter: String, instruction: String, settings: AppSettings) async throws -> String {
@@ -121,7 +156,10 @@ final class RewriteService {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
             let rawMessage = (try? JSONDecoder().decode(APIErrorEnvelope.self, from: data))?.error?.message
-            throw RewriteError.api(friendlyAPIError(status: http.statusCode, rawMessage: rawMessage))
+            throw RewriteError.apiStatus(
+                status: http.statusCode,
+                message: friendlyAPIError(status: http.statusCode, rawMessage: rawMessage)
+            )
         }
     }
 
@@ -276,6 +314,7 @@ final class RewriteService {
 enum RewriteError: LocalizedError {
     case missingAPIKey
     case api(String)
+    case apiStatus(status: Int, message: String)
     case timeout
     case invalidEndpoint
     case insecureEndpoint
@@ -284,6 +323,7 @@ enum RewriteError: LocalizedError {
         switch self {
         case .missingAPIKey: return "请先配置 API Key"
         case .api(let message): return message
+        case .apiStatus(_, let message): return message
         case .timeout: return "模型响应超时，请稍后再试"
         case .invalidEndpoint: return "Base URL 格式不正确"
         case .insecureEndpoint: return "Base URL 需要使用 HTTPS；本地 localhost 调试除外"
@@ -297,6 +337,10 @@ private struct ChatRequest: Encodable {
     let temperature: Double
     let maxTokens: Int
     let thinking: ThinkingConfig?
+
+    var sourceTextForTimeout: String {
+        messages.last?.content ?? ""
+    }
 
     enum CodingKeys: String, CodingKey {
         case model

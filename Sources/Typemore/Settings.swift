@@ -103,6 +103,7 @@ struct AppSettings: Codable, Equatable {
     var endpoint: String
     var model: String
     var apiKey: String
+    var thinkingEnabled: Bool
     var defaultMode: RewriteMode
     var customStyle: String
     var systemPrompt: String
@@ -157,6 +158,7 @@ struct AppSettings: Codable, Equatable {
         endpoint: VolcengineEndpointKind.api.defaultEndpoint,
         model: Provider.volcengine.defaultModel,
         apiKey: "",
+        thinkingEnabled: false,
         defaultMode: .clear,
         customStyle: defaultCustomStyle,
         systemPrompt: defaultSystemPrompt
@@ -190,6 +192,7 @@ struct AppSettings: Codable, Equatable {
         case endpoint
         case model
         case apiKey
+        case thinkingEnabled
         case defaultMode
         case customStyle
         case systemPrompt
@@ -202,6 +205,7 @@ struct AppSettings: Codable, Equatable {
         endpoint: String,
         model: String,
         apiKey: String,
+        thinkingEnabled: Bool,
         defaultMode: RewriteMode,
         customStyle: String,
         systemPrompt: String
@@ -212,6 +216,7 @@ struct AppSettings: Codable, Equatable {
         self.endpoint = endpoint
         self.model = model
         self.apiKey = apiKey
+        self.thinkingEnabled = thinkingEnabled
         self.defaultMode = defaultMode
         self.customStyle = customStyle
         self.systemPrompt = systemPrompt
@@ -225,6 +230,7 @@ struct AppSettings: Codable, Equatable {
         self.volcengineEndpointKind = try container.decodeIfPresent(VolcengineEndpointKind.self, forKey: .volcengineEndpointKind) ?? VolcengineEndpointKind.infer(from: endpoint)
         self.model = try container.decodeIfPresent(String.self, forKey: .model) ?? provider.defaultModel
         self.apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
+        self.thinkingEnabled = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
         if let rawDefaultMode = try container.decodeIfPresent(String.self, forKey: .defaultMode) {
             self.defaultMode = RewriteMode(rawValue: rawDefaultMode) ?? .clear
         } else {
@@ -242,6 +248,7 @@ struct AppSettings: Codable, Equatable {
         try container.encode(serviceName, forKey: .serviceName)
         try container.encode(endpoint, forKey: .endpoint)
         try container.encode(model, forKey: .model)
+        try container.encode(thinkingEnabled, forKey: .thinkingEnabled)
         try container.encode(defaultMode, forKey: .defaultMode)
         try container.encode(customStyle, forKey: .customStyle)
         try container.encode(systemPrompt, forKey: .systemPrompt)

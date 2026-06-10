@@ -121,9 +121,7 @@ struct SettingsView: View {
                 SettingsField(title: "Base URL", text: $draft.endpoint, placeholder: providerEndpointPlaceholder)
                 SettingsField(title: "Model", text: $draft.model, placeholder: providerModelPlaceholder)
                 SettingsField(title: "API Key", text: $draft.apiKey, placeholder: "sk-...", isSecure: true)
-                if draft.provider == .compatible {
-                    compatibleThinkingTip
-                }
+                thinkingModeRow
             }
         }
     }
@@ -163,20 +161,25 @@ struct SettingsView: View {
         }
     }
 
-    private var compatibleThinkingTip: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "info.circle")
+    private var thinkingModeRow: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text("思考模式")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(SettingsTheme.secondaryText)
-                .padding(.top, 1)
-            Text("为了更快改写，建议关闭思考/推理模式，或选择非思考模型。若开启思考，改写过程可能长达 30 秒以上。")
-                .font(.system(size: 11))
-                .foregroundStyle(SettingsTheme.secondaryText)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 88, alignment: .leading)
+                .padding(.top, 8)
+            VStack(alignment: .leading, spacing: 6) {
+                ThinkingModeToggle(isOn: $draft.thinkingEnabled)
+                Text("建议默认关闭。开启后模型可能会进入推理流程，改写时间可能变长，部分服务可能需要 30 秒以上。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SettingsTheme.secondaryText)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.leading, 102)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var writingCard: some View {
@@ -701,6 +704,50 @@ private struct PermissionRow: View {
             Button("打开", action: openAction)
                 .buttonStyle(SecondarySettingsButtonStyle())
         }
+    }
+}
+
+private struct ThinkingModeToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.16)) {
+                isOn.toggle()
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Text("开启思考/推理模式")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(SettingsTheme.primaryText)
+                Spacer(minLength: 0)
+                Text(isOn ? "已开启" : "已关闭")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(isOn ? SettingsTheme.green : SettingsTheme.secondaryText)
+                ZStack(alignment: isOn ? .trailing : .leading) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isOn ? SettingsTheme.green.opacity(0.95) : SettingsTheme.field)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(isOn ? SettingsTheme.green.opacity(0.65) : SettingsTheme.stroke, lineWidth: 1)
+                        )
+                    Circle()
+                        .fill(isOn ? Color.black.opacity(0.78) : SettingsTheme.secondaryText)
+                        .frame(width: 14, height: 14)
+                        .padding(3)
+                }
+                .frame(width: 38, height: 20)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(SettingsTheme.field)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isOn ? SettingsTheme.green.opacity(0.28) : SettingsTheme.stroke, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
