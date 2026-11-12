@@ -34,4 +34,4 @@ jobs:
             .build/arm64-apple-macosx/release/Typemore \
             .build/x86_64-apple-macosx/release/Typemore \
             -output /tmp/Typemore-universal
-          lipo -verify_arch arm64 x86_64 /tmp/Typemore-universal
+          lipo /tmp/Typemore-universal -verify_arch arm64 x86_64
