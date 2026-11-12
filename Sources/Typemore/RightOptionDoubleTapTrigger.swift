@@ -108,11 +108,13 @@ final class RightOptionDoubleTapTrigger {
 enum TriggerError: LocalizedError {
     case registrationFailed
     case inputMonitoringRequired
+    case invalidChord
 
     var errorDescription: String? {
         switch self {
-        case .registrationFailed: return "右 Option 双击监听失败，请确认已开启输入监控权限"
+        case .registrationFailed: return "触发键监听注册失败，请确认已开启输入监控权限，或换一个组合键"
         case .inputMonitoringRequired: return "需要开启 macOS 输入监控权限"
+        case .invalidChord: return "自定义组合键至少需要一个修饰键（⌃⌥⇧⌘）"
         }
     }
 }

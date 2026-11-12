@@ -1,7 +1,10 @@
 import AppKit
 
 guard let instanceLock = InstanceLock.acquire() else {
-    print("[Typemore] Another Typemore instance is already running. Exit.")
+    DistributedNotificationCenter.default().postNotificationName(
+        .typemoreOpenSettings, object: Bundle.main.bundleIdentifier, userInfo: nil, deliverImmediately: true
+    )
+    print("[Typemore] Opened settings in the running instance.")
     exit(0)
 }
 
@@ -11,5 +14,8 @@ let delegate = MainActor.assumeIsolated {
     app.delegate = delegate
     return delegate
 }
-_ = instanceLock
-app.run()
+// NSApplication.delegate 不持有强引用；显式覆盖整个 run loop 生命周期，
+// 避免 release 优化在启动回调后释放 delegate 与单实例锁。
+withExtendedLifetime((delegate, instanceLock)) {
+    app.run()
+}

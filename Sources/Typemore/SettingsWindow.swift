@@ -1,262 +1,472 @@
 import AppKit
 import ApplicationServices
+import Combine
 import CoreGraphics
 import SwiftUI
 
 @MainActor
-final class SettingsWindowController {
+final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let store: SettingsStore
+    private let triggerController: RewriteTriggerCoordinator
+    private let recorder = ChordRecorder()
+    private var recordingObservation: AnyCancellable?
     private var window: NSWindow?
 
-    init(store: SettingsStore) {
+    init(store: SettingsStore, triggerController: RewriteTriggerCoordinator) {
         self.store = store
+        self.triggerController = triggerController
+        super.init()
+        observeRecording()
     }
 
-    func show() {
+    private func observeRecording() {
+        recordingObservation = recorder.$isRecording.removeDuplicates().dropFirst().sink { [weak self] recording in
+            guard let self else { return }
+            if recording { self.triggerController.pause() }
+            else { self.triggerController.resume() }
+        }
+    }
+
+    func show() { show(initialPage: .general) }
+
+    func showAbout() {
+        recorder.cancel()
+        let hadWindow = window != nil
+        show(initialPage: .about)
+        if hadWindow {
+            NotificationCenter.default.post(name: .typemoreOpenAbout, object: recorder)
+        }
+    }
+
+    private func show(initialPage: SettingsPage) {
         if window == nil {
-            let rootView = SettingsView(store: store)
-            let hosting = NSHostingView(rootView: rootView)
+            let root = SettingsView(store: store, recorder: recorder, initialPage: initialPage)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 760, height: 720),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                contentRect: NSRect(x: 0, y: 0, width: 900, height: 660),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Typemore Settings"
+            window.title = "Typemore"
+            window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
-            window.backgroundColor = NSColor(red: 0.035, green: 0.043, blue: 0.039, alpha: 1)
-            window.minSize = NSSize(width: 680, height: 620)
-            window.contentView = hosting
+            window.toolbarStyle = .unified
+            window.backgroundColor = .windowBackgroundColor
+            window.minSize = NSSize(width: 760, height: 560)
+            window.contentView = NSHostingView(rootView: root)
             window.isReleasedWhenClosed = false
+            window.delegate = self
+            if !window.setFrameUsingName("TypemoreSettings") { window.center() }
+            window.setFrameAutosaveName("TypemoreSettings")
             self.window = window
         }
-        window?.center()
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) { recorder.cancel() }
+    func windowDidResignKey(_ notification: Notification) { recorder.cancel() }
+}
+
+enum SettingsPage: String, CaseIterable, Identifiable {
+    case general, writing, service, permissions, about
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .general: return "通用"
+        case .writing: return "表达风格"
+        case .service: return "模型服务"
+        case .permissions: return "权限与隐私"
+        case .about: return "关于"
+        }
+    }
+    var icon: AppSymbol {
+        switch self {
+        case .general: return .general
+        case .writing: return .writing
+        case .service: return .model
+        case .permissions: return .permissions
+        case .about: return .info
+        }
     }
 }
 
 struct SettingsView: View {
     @ObservedObject var store: SettingsStore
+    @ObservedObject var recorder: ChordRecorder
     @State private var draft: AppSettings
-    @State private var draftAPIKeys: [Provider: String]
+    @State private var draftAPIKeys: [String: String]
+    @State private var originalAPIKeys: [String: String]
+    @State private var page: SettingsPage
     @State private var status = ""
-    @State private var selectedStyle: StyleTab
     @State private var accessibilityGranted = false
     @State private var inputMonitoringGranted = false
+    @State private var statusGeneration = 0
+    @State private var recordingPreviousTrigger: RewriteTrigger?
+    @State private var rememberedChord: TriggerChord?
+    @StateObject private var rewritePractice = RewritePracticeModel()
+    @StateObject private var modelConnectionController = ModelConnectionController()
+    @State private var modelServiceDialog: ModelServiceDialog?
 
-    init(store: SettingsStore) {
+    init(store: SettingsStore, recorder: ChordRecorder,
+         initialPage: SettingsPage = .general) {
         self.store = store
+        self.recorder = recorder
+        _page = State(initialValue: initialPage)
         _draft = State(initialValue: store.settings)
-        _draftAPIKeys = State(initialValue: Self.loadDraftAPIKeys(current: store.settings))
-        _selectedStyle = State(initialValue: store.settings.defaultMode == .custom ? .custom : .default)
+        // 仅缓存当前服务已加载的 Key；切换服务时再按需读取钥匙串。
+        _draftAPIKeys = State(initialValue: store.settings.provider.requiresAPIKey
+            ? [store.settings.credentialAccount: store.settings.apiKey] : [:])
+        _originalAPIKeys = State(initialValue: store.settings.provider.requiresAPIKey
+            ? [store.settings.credentialAccount: store.settings.apiKey] : [:])
+        if case .chord(let chord) = store.settings.rewriteTrigger {
+            _rememberedChord = State(initialValue: chord)
+        }
     }
 
+
     var body: some View {
-        ZStack {
-            SettingsTheme.background.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 14) {
-                        providerCard
-                        writingCard
-                        privacyCard
+        HStack(spacing: 0) {
+            sidebar
+            Rectangle().fill(UITheme.border).frame(width: 1)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(page.title)
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(UITheme.text)
+                    .padding(.horizontal, 36)
+                    .padding(.top, 42)
+                    .padding(.bottom, 28)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 30) {
+                        switch page {
+                        case .general: generalPage
+                        case .writing: writingPage
+                        case .service: servicePage
+                        case .permissions: permissionsPage
+                        case .about: AboutView()
+                        }
                     }
-                    .padding(.bottom, 4)
+                    .padding(.horizontal, 36)
+                    .padding(.bottom, 28)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                footer
+                if page != .about { footer }
             }
-            .padding(28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(UITheme.background)
+        }
+        .ignoresSafeArea()
+        .tint(UITheme.accent)
+        .disabled(modelServiceDialog != nil)
+        .accessibilityHidden(modelServiceDialog != nil)
+        .overlay {
+            if page == .service { modelService.dialogOverlay }
         }
         .onAppear {
             normalizeProviderSelectionIfNeeded()
             refreshPermissionStatus()
+            recorder.onFinish = { chord in
+                if let chord {
+                    draft.rewriteTrigger = .chord(chord)
+                    rememberedChord = chord
+                } else if let previous = recordingPreviousTrigger {
+                    draft.rewriteTrigger = previous
+                }
+                recordingPreviousTrigger = nil
+            }
+        }
+        .onChange(of: page) { _ in
+            modelServiceDialog = nil
+            recorder.cancel()
+            refreshPermissionStatus()
+        }
+        .task(id: page) {
+            guard page == .permissions else { return }
+            while !Task.isCancelled {
+                refreshPermissionStatus()
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                catch { return }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionStatus()
         }
-        .onReceive(store.$settings) { settings in
-            draft = settings
-            draftAPIKeys[settings.provider] = settings.apiKey
+        .onReceive(NotificationCenter.default.publisher(for: .typemoreOpenAbout, object: recorder)) { _ in
+            page = .about
         }
-        .onReceive(store.$settings) { settings in
-            selectedStyle = settings.defaultMode == .custom ? .custom : .default
+        .onReceive(store.$settings) { saved in
+            draft = saved
+            if saved.provider.requiresAPIKey {
+                draftAPIKeys[saved.credentialAccount] = saved.apiKey
+                originalAPIKeys[saved.credentialAccount] = saved.apiKey
+            }
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 9) {
-                    TypemoreMark()
-                    Text("Typemore")
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
-                        .foregroundStyle(SettingsTheme.primaryText)
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(spacing: 9) {
+                TypemoreMark()
+                Text("Typemore").font(.system(size: 17, weight: .semibold))
+            }
+            .padding(.horizontal, 14)
+            VStack(spacing: 4) {
+                ForEach(SettingsPage.allCases.filter { $0 != .about }) { item in
+                    navigationButton(item)
                 }
-                Text("Type more，让表达更丰富")
-                    .font(.system(size: 13))
-                    .foregroundStyle(SettingsTheme.secondaryText)
             }
             Spacer()
+            navigationButton(.about)
         }
+        .padding(.horizontal, 12)
+        .padding(.top, 48)
+        .padding(.bottom, 22)
+        .frame(width: 188)
+        .frame(maxHeight: .infinity)
+        .background(UITheme.sidebar)
+        .foregroundStyle(UITheme.text)
     }
 
-    private var providerCard: some View {
-        SettingsCard(title: "Model Service") {
-            VStack(alignment: .leading, spacing: 14) {
-                ServiceTypeSelector(selection: providerSelection)
-                if draft.provider == .volcengine {
-                    VolcengineEndpointSelector(selection: $draft.volcengineEndpointKind)
-                        .onChange(of: draft.volcengineEndpointKind) { kind in
-                            applyVolcengineEndpointDefaults(kind)
+    private func navigationButton(_ item: SettingsPage) -> some View {
+        Button { page = item } label: {
+            HStack(spacing: 10) {
+                AppIcon(symbol: item.icon)
+                Text(item.title)
+                Spacer(minLength: 4)
+                if item == .about {
+                    Text(AboutMetadata().sidebarVersion)
+                        .font(.system(size: 10))
+                        .foregroundStyle(UITheme.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .font(.system(size: 13, weight: page == item ? .medium : .regular))
+            .foregroundStyle(page == item ? UITheme.text : UITheme.secondary)
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(page == item ? UITheme.selection : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(page == item ? .isSelected : [])
+    }
+
+    @ViewBuilder private var generalPage: some View {
+        SettingsSection("快捷键", icon: .keyboard) {
+            SettingsRow("润色快捷键") {
+                HStack(spacing: 2) {
+                    triggerOption("双击右 Option", custom: false)
+                    triggerOption("组合快捷键", custom: true)
+                }
+                .padding(3)
+                .frame(width: 280)
+                .background(UITheme.field)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(UITheme.border, lineWidth: 1))
+            }
+            if isChordSelected {
+                SettingsRow("组合键") {
+                    Button {
+                        if recorder.isRecording { recorder.cancel() }
+                        else { startChordRecording() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            AppIcon(symbol: .keyboard)
+                            Text(recorder.isRecording ? chordPreview : draft.rewriteTrigger.displayText)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(recorder.isRecording ? "取消" : "重新录制")
+                                .font(.system(size: 11))
+                                .foregroundStyle(UITheme.secondary)
                         }
-                }
-                Text(providerHelpText)
-                    .font(.system(size: 11))
-                    .foregroundStyle(SettingsTheme.secondaryText)
-                    .lineSpacing(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 102)
-                SettingsField(title: "Base URL", text: $draft.endpoint, placeholder: providerEndpointPlaceholder)
-                SettingsField(title: "Model", text: $draft.model, placeholder: providerModelPlaceholder)
-                SettingsField(title: "API Key", text: $draft.apiKey, placeholder: "sk-...", isSecure: true)
-                thinkingModeRow
-            }
-        }
-    }
-
-    private var providerHelpText: String {
-        switch draft.provider {
-        case .volcengine:
-            return draft.volcengineEndpointKind == .api
-                ? "适合直接使用火山方舟 API 的用户。"
-                : "适合使用火山方舟 Coding Plan / AI 工具兼容入口的用户。"
-        case .compatible:
-            return "适合 DeepSeek、OpenRouter、Moonshot、硅基流动等支持 OpenAI 兼容接口的服务。"
-        case .demo, .openai:
-            return ""
-        }
-    }
-
-    private var providerEndpointPlaceholder: String {
-        switch draft.provider {
-        case .volcengine:
-            return draft.volcengineEndpointKind.defaultEndpoint
-        case .compatible:
-            return "例如 https://api.deepseek.com"
-        case .demo, .openai:
-            return "https://..."
-        }
-    }
-
-    private var providerModelPlaceholder: String {
-        switch draft.provider {
-        case .volcengine:
-            return Provider.volcengine.defaultModel
-        case .compatible:
-            return "例如 deepseek-chat"
-        case .demo, .openai:
-            return "model name"
-        }
-    }
-
-    private var thinkingModeRow: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Text("思考模式")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-                .frame(width: 88, alignment: .leading)
-                .padding(.top, 8)
-            VStack(alignment: .leading, spacing: 6) {
-                ThinkingModeToggle(isOn: $draft.thinkingEnabled)
-                Text("建议默认关闭。开启后模型可能会进入推理流程，改写时间可能变长，部分服务可能需要 30 秒以上。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(SettingsTheme.secondaryText)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var writingCard: some View {
-        SettingsCard(title: "Writing Style") {
-            VStack(spacing: 14) {
-                StyleTabSelector(selection: $selectedStyle)
-                    .onChange(of: selectedStyle) { tab in
-                        draft.defaultMode = tab == .custom ? .custom : .clear
+                        .frame(width: 256)
                     }
-                if selectedStyle == .custom {
-                    SettingsEditor(
-                        title: "自定义风格",
-                        text: $draft.customStyle,
-                        minHeight: 116,
-                        placeholder: "描述你希望 Typemore 遵循的表达风格。"
-                    )
-                } else {
-                    DefaultStylePreview()
+                    .buttonStyle(SettingsButtonStyle())
+                    .overlay(RoundedRectangle(cornerRadius: 8)
+                        .stroke(recorder.isRecording ? UITheme.accent : Color.clear, lineWidth: 1))
+                    .accessibilityLabel(recorder.isRecording ? "取消录制" : "录制快捷键")
                 }
+                if let error = recorder.errorHint {
+                    Text(error).font(.system(size: 12)).foregroundStyle(UITheme.error)
+                } else if recorder.isRecording {
+                    Text("按下组合键 · Esc 取消").font(.system(size: 12)).foregroundStyle(UITheme.secondary)
+                }
+            }
+        }
+        SettingsSection("使用", icon: .rewrite) {
+            RewritePracticeView(
+                model: rewritePractice,
+                trigger: store.settings.rewriteTrigger,
+                isRecording: recorder.isRecording
+            )
+        }
+    }
+
+    @ViewBuilder private var writingPage: some View {
+        HStack(spacing: 12) {
+            styleOption("默认表达", mode: .clear, icon: .defaultStyle)
+            styleOption("自定义表达", mode: .custom, icon: .customStyle)
+        }
+        if draft.defaultMode == .custom {
+            SettingsSection("表达偏好", icon: .edit) {
+                ZStack(alignment: .topLeading) {
+                    if draft.customStyle.isEmpty {
+                        Text("例如：自然简洁，先说结论，适当分点。")
+                            .foregroundStyle(UITheme.secondary)
+                            .padding(12)
+                    }
+                    TextEditor(text: $draft.customStyle)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .accessibilityLabel("表达偏好")
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(UITheme.text)
+                .frame(minHeight: 240)
+                .background(UITheme.field)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(UITheme.border, lineWidth: 1))
             }
         }
     }
 
-    private var privacyCard: some View {
-        SettingsCard(title: "Privacy & Permissions") {
-            VStack(alignment: .leading, spacing: 14) {
-                PermissionRow(
-                    title: "辅助功能",
-                    granted: accessibilityGranted,
-                    openAction: { SystemTextService().openAccessibilitySettings() }
-                )
-                PermissionRow(
-                    title: "输入监控",
-                    granted: inputMonitoringGranted,
-                    openAction: { SystemTextService().openInputMonitoringSettings() }
-                )
-                if hasMissingPermission {
-                    permissionRepairTip
-                }
+    private func styleOption(_ title: String, mode: RewriteMode, icon: AppSymbol) -> some View {
+        Button { draft.defaultMode = mode } label: {
+            HStack(spacing: 10) {
+                AppIcon(symbol: icon)
+                Text(title)
+                Spacer()
+                AppIcon(symbol: draft.defaultMode == mode ? .connected : .idle)
+                    .foregroundStyle(draft.defaultMode == mode ? UITheme.accent : UITheme.secondary)
+            }
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(UITheme.text)
+            .padding(16)
+            .frame(maxWidth: .infinity)
+            .background(draft.defaultMode == mode ? UITheme.selection : UITheme.field)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(UITheme.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(draft.defaultMode == mode ? .isSelected : [])
+    }
+
+    @ViewBuilder private var servicePage: some View {
+        modelService
+    }
+
+    private var modelService: ModelServiceView {
+        ModelServiceView(draft: $draft, apiKeys: $draftAPIKeys, store: store,
+                         controller: modelConnectionController, dialog: $modelServiceDialog)
+    }
+
+
+    @ViewBuilder private var permissionsPage: some View {
+        SettingsSection("系统权限", icon: .permissions) {
+            permissionRow("辅助功能", granted: accessibilityGranted) { SystemTextService().openAccessibilitySettings() }
+            permissionRow("输入监控", granted: inputMonitoringGranted) { SystemTextService().openInputMonitoringSettings() }
+        }
+        SettingsSection("数据与信息安全", icon: .info) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("仅在触发润色时读取目标文字与必要上下文，并发送到你选择的模型服务。")
+                Text("不存储账号密码；API Key 保存在本机钥匙串。诊断日志不记录待润色正文。")
+                Text("豆包 CLI 会按豆包的规则保存任务会话；请在豆包中管理相关记录。")
+                Text("复制与粘贴后恢复剪贴板。第三方剪贴板工具可能记录中间内容。")
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(UITheme.secondary)
+            .lineSpacing(3)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func permissionRow(_ title: String, granted: Bool, action: @escaping () -> Void) -> some View {
+        SettingsRow(title) {
+            HStack(spacing: 12) {
+                AppIconLabel(title: granted ? "已开启" : "未开启",
+                    symbol: granted ? .connected : .idle, size: .small)
+                    .font(.system(size: 12))
+                    .foregroundStyle(granted ? UITheme.success : UITheme.secondary)
+                Button(granted ? "管理权限" : "开启权限", action: action)
+                    .buttonStyle(SettingsButtonStyle())
+                    .accessibilityLabel("打开\(title)设置")
             }
         }
     }
 
-    private var hasMissingPermission: Bool {
-        !accessibilityGranted || !inputMonitoringGranted
+    private var footer: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(UITheme.border).frame(height: 1)
+            HStack(spacing: 12) {
+                Button("恢复默认") { resetDraft() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(UITheme.secondary)
+                Spacer(minLength: 8)
+                if !status.isEmpty {
+                    Text(status)
+                        .foregroundStyle(status == "已保存" ? UITheme.success : UITheme.error)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if hasChanges {
+                    Button("取消") { discardDraft() }
+                        .buttonStyle(SettingsButtonStyle(minimumWidth: 84))
+                }
+                Button("保存") { save() }
+                    .buttonStyle(SettingsButtonStyle(primary: true, minimumWidth: 84))
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!hasChanges || invalidChord || recorder.isRecording)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 36)
+            .padding(.vertical, 18)
+        }
     }
 
-    private var permissionRepairTip: some View {
-        HStack(alignment: .top, spacing: 9) {
-            Image(systemName: "lightbulb")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.green.opacity(0.95))
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("如果这里显示未开启，但你已经在 macOS 里打开过")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(SettingsTheme.primaryText)
-                Text("请按这几步修复：1. 点下方对应权限的「打开」；2. 在「系统设置 > 隐私与安全性 > 辅助功能/输入监控」里，先把 Typemore 从列表中移除，再重新添加并打开；3. 完全退出 Typemore 后重新打开。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(SettingsTheme.secondaryText)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("刷新状态") {
-                    refreshPermissionStatus()
-                }
-                .buttonStyle(InlineSettingsButtonStyle())
-                .padding(.top, 2)
-            }
+    private var hasChanges: Bool {
+        draft != store.settings || draftAPIKeys.contains { provider, key in key != originalAPIKeys[provider] }
+    }
+    private var isChordSelected: Bool {
+        if case .chord = draft.rewriteTrigger { return true }
+        return false
+    }
+    private var invalidChord: Bool {
+        if case .chord(let chord) = draft.rewriteTrigger { return !chord.hasModifier }
+        return false
+    }
+    private var chordPreview: String {
+        let symbols = recorder.liveModifiers.map(\.symbol).joined()
+        return symbols.isEmpty ? "按下组合键…" : "\(symbols)…"
+    }
+    private func triggerOption(_ title: String, custom: Bool) -> some View {
+        Button {
+            guard custom != isChordSelected else { return }
+            recorder.cancel()
+            if custom { startChordRecording() }
+            else { draft.rewriteTrigger = .doubleTapRightOption }
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(custom == isChordSelected ? UITheme.text : UITheme.secondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 28)
+                .background(custom == isChordSelected ? UITheme.selection : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(SettingsTheme.green.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(SettingsTheme.green.opacity(0.16), lineWidth: 1)
-        )
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(custom == isChordSelected ? .isSelected : [])
+    }
+
+    private func startChordRecording() {
+        recordingPreviousTrigger = draft.rewriteTrigger
+        draft.rewriteTrigger = rememberedChord.map(RewriteTrigger.chord)
+            ?? .chord(TriggerChord(modifiers: [], keyCode: 0, keyLabel: ""))
+        recorder.start()
+    }
+    private var providerSelection: Binding<Provider> {
+        Binding(get: { draft.provider }, set: { switchProvider(to: $0) })
     }
 
     private func refreshPermissionStatus() {
@@ -264,549 +474,122 @@ struct SettingsView: View {
         inputMonitoringGranted = CGPreflightListenEventAccess()
     }
 
-    private var footer: some View {
-        HStack(spacing: 10) {
-            Button("保存设置") { save() }
-                .buttonStyle(PrimarySettingsButtonStyle())
-                .keyboardShortcut(.defaultAction)
-            Button("恢复默认") { reset() }
-                .buttonStyle(SecondarySettingsButtonStyle())
-            if !status.isEmpty {
-                Text(status)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(status == "已保存" ? SettingsTheme.green : SettingsTheme.error)
-                    .transition(.opacity)
-            }
-            Spacer()
-        }
-    }
-
     private func save() {
+        guard !invalidChord, !recorder.isRecording else { return }
         do {
-            if ![Provider.volcengine, .compatible].contains(draft.provider) {
-                draft.provider = .compatible
-            }
             rememberDraftAPIKey(for: draft.provider)
-            persistDraftAPIKeys()
-            draft.serviceName = draft.provider.displayName
-            draft.defaultMode = selectedStyle == .custom ? .custom : .clear
-            if draft.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.serviceName = draft.provider.displayName
-            }
-            if draft.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.endpoint = draft.provider == .volcengine ? draft.volcengineEndpointKind.defaultEndpoint : draft.provider.defaultEndpoint
-            }
-            if draft.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft.model = draft.provider.defaultModel
-            }
-            try store.save(draft)
+            try store.save(draft, apiKeys: draftAPIKeys)
+            originalAPIKeys = draftAPIKeys
+            statusGeneration += 1
+            let generation = statusGeneration
             status = "已保存"
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                if status == "已保存" { status = "" }
+                if statusGeneration == generation { status = "" }
             }
         } catch {
             status = error.localizedDescription
         }
     }
 
-    private func reset() {
-        KeychainStore.deleteAllAPIKeys()
-        draftAPIKeys = [:]
+    private func discardDraft() {
+        recorder.cancel()
+        draft = store.settings
+        draftAPIKeys = draft.provider.requiresAPIKey ? [draft.credentialAccount: draft.apiKey] : [:]
+        originalAPIKeys = draftAPIKeys
+        statusGeneration += 1
+        status = ""
+    }
+
+    private func resetDraft() {
+        recorder.cancel()
+        draft.rememberConnection()
+        let current = draft
         draft = AppSettings.defaults
-        selectedStyle = .default
-        save()
+        draft.connections = current.connections
+        if let connection = current.connections.first(where: { $0.id == current.activeConnectionID }) {
+            draft.selectConnection(connection, key: current.apiKey)
+        }
+        statusGeneration += 1
+        status = ""
     }
 
     private func normalizeProviderSelectionIfNeeded() {
-        guard ![Provider.volcengine, .compatible].contains(draft.provider) else { return }
-        draft.provider = .compatible
-        draft.serviceName = Provider.compatible.displayName
-        draft.apiKey = apiKey(for: .compatible)
-    }
-
-    private static func loadDraftAPIKeys(current settings: AppSettings) -> [Provider: String] {
-        var keys: [Provider: String] = [:]
-        for provider in [Provider.volcengine, .compatible] {
-            keys[provider] = KeychainStore.loadAPIKey(for: provider)
-        }
-        keys[settings.provider] = settings.apiKey
-        return keys
-    }
-
-    private var providerSelection: Binding<Provider> {
-        Binding(
-            get: { draft.provider },
-            set: { switchProvider(to: $0) }
-        )
+        draft.ensureConnection()
     }
 
     private func switchProvider(to provider: Provider) {
         guard provider != draft.provider else { return }
         rememberDraftAPIKey(for: draft.provider)
-        draft.provider = provider
-        draft.apiKey = apiKey(for: provider)
-        applyProviderDefaults(provider)
+        draft.addConnection(provider)
     }
 
     private func rememberDraftAPIKey(for provider: Provider) {
-        guard [Provider.volcengine, .compatible].contains(provider) else { return }
-        draftAPIKeys[provider] = draft.apiKey
+        if provider.requiresAPIKey { draftAPIKeys[draft.credentialAccount] = draft.apiKey }
     }
 
-    private func persistDraftAPIKeys() {
-        for provider in [Provider.volcengine, .compatible] {
-            KeychainStore.saveAPIKey(draftAPIKeys[provider] ?? "", for: provider)
-        }
-    }
 
-    private func apiKey(for provider: Provider) -> String {
-        if let cached = draftAPIKeys[provider] {
-            return cached
-        }
-        return KeychainStore.loadAPIKey(for: provider)
-    }
-
-    private func applyProviderDefaults(_ provider: Provider) {
-        draft.serviceName = provider.displayName
-        draft.endpoint = provider == .volcengine ? draft.volcengineEndpointKind.defaultEndpoint : provider.defaultEndpoint
-        draft.model = provider.defaultModel
-    }
-
-    private func applyVolcengineEndpointDefaults(_ kind: VolcengineEndpointKind) {
-        draft.endpoint = kind.defaultEndpoint
-    }
 }
 
-private enum SettingsTheme {
-    static let green = Color(red: 0.27, green: 0.96, blue: 0.61)
-    static let error = Color(red: 1.0, green: 0.42, blue: 0.42)
-    static let primaryText = Color(red: 0.93, green: 0.98, blue: 0.95)
-    static let secondaryText = Color(red: 0.58, green: 0.65, blue: 0.61)
-    static let mutedText = Color(red: 0.42, green: 0.49, blue: 0.45)
-    static let card = Color(red: 0.055, green: 0.071, blue: 0.064)
-    static let field = Color(red: 0.028, green: 0.038, blue: 0.034)
-    static let stroke = Color.white.opacity(0.08)
-
-    static var background: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.032, green: 0.043, blue: 0.039),
-                    Color(red: 0.014, green: 0.019, blue: 0.017)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Circle()
-                .fill(green.opacity(0.08))
-                .frame(width: 360, height: 360)
-                .blur(radius: 70)
-                .offset(x: -280, y: -230)
-            Circle()
-                .fill(Color.white.opacity(0.035))
-                .frame(width: 300, height: 300)
-                .blur(radius: 70)
-                .offset(x: 300, y: 250)
-        }
-    }
-}
-
-private enum StyleTab: String, CaseIterable, Identifiable {
-    case `default`
-    case custom
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .default: return "默认风格"
-        case .custom: return "自定义风格"
-        }
-    }
-}
-
-private struct TypemoreMark: View {
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(SettingsTheme.green.opacity(0.12))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(SettingsTheme.green.opacity(0.28), lineWidth: 1)
-                )
-            Text("T+")
-                .font(.system(size: 14, weight: .heavy, design: .rounded))
-                .foregroundStyle(SettingsTheme.green)
-        }
-        .frame(width: 34, height: 34)
-    }
-}
-
-private struct SettingsCard<Content: View>: View {
+struct SettingsSection<Content: View>: View {
     let title: String
-    @ViewBuilder var content: Content
+    let icon: AppSymbol
+    @ViewBuilder let content: Content
 
+    init(_ title: String, icon: AppSymbol, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.icon = icon
+        self.content = content()
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title)
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(SettingsTheme.primaryText)
+        VStack(alignment: .leading, spacing: 18) {
+            AppIconLabel(title: title, symbol: icon, size: .small)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(UITheme.secondary)
+            Rectangle().fill(UITheme.border).frame(height: 1)
             content
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(SettingsTheme.card.opacity(0.96))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(SettingsTheme.stroke, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.22), radius: 18, y: 10)
     }
 }
 
-private struct SettingsField: View {
+struct SettingsRow<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+    var body: some View {
+        HStack(alignment: .center, spacing: 20) {
+            Text(title).font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 8)
+            content
+        }
+        .foregroundStyle(UITheme.text)
+        .frame(minHeight: 38)
+    }
+}
+
+private struct SettingsTextField: View {
     let title: String
     @Binding var text: String
     let placeholder: String
-    var isSecure = false
+    var secure = false
 
     var body: some View {
-        HStack(spacing: 14) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-                .frame(width: 88, alignment: .leading)
+        SettingsRow(title) {
             Group {
-                if isSecure {
-                    SecureField(placeholder, text: $text)
-                } else {
-                    TextField(placeholder, text: $text)
-                }
+                if secure { SecureField(placeholder, text: $text) }
+                else { TextField(placeholder, text: $text) }
             }
             .textFieldStyle(.plain)
             .font(.system(size: 13))
-            .foregroundColor(SettingsTheme.primaryText)
             .padding(.horizontal, 12)
-            .frame(height: 34)
-            .background(SettingsTheme.field)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(SettingsTheme.stroke, lineWidth: 1)
-            )
+            .frame(width: 280, height: 34)
+            .background(UITheme.field)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(UITheme.border, lineWidth: 1))
+            .accessibilityLabel(title)
         }
-    }
-}
-
-private struct SettingsEditor: View {
-    let title: String
-    @Binding var text: String
-    let minHeight: CGFloat
-    let placeholder: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-            ZStack(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text(placeholder)
-                        .font(.system(size: 12))
-                        .foregroundStyle(SettingsTheme.mutedText)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 9)
-                }
-                TextEditor(text: $text)
-                    .font(.system(size: 12))
-                    .foregroundColor(SettingsTheme.primaryText)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 5)
-            }
-            .frame(minHeight: minHeight)
-            .background(SettingsTheme.field)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(SettingsTheme.stroke, lineWidth: 1)
-            )
-        }
-    }
-}
-
-private struct ServiceTypeSelector: View {
-    @Binding var selection: Provider
-
-    private let options: [Provider] = [.volcengine, .compatible]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("服务类型")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-            HStack(spacing: 8) {
-                ForEach(options) { provider in
-                    SegmentButton(
-                        title: provider.displayName,
-                        isSelected: selection == provider
-                    ) {
-                        selection = provider
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct VolcengineEndpointSelector: View {
-    @Binding var selection: VolcengineEndpointKind
-    @State private var isExpanded = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Text("接入方式")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-                .frame(width: 88, alignment: .leading)
-                .padding(.top, 9)
-            VStack(alignment: .leading, spacing: 6) {
-                Button {
-                    withAnimation(.easeOut(duration: 0.12)) { isExpanded.toggle() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(selection.displayName)
-                            .font(.system(size: 13))
-                            .foregroundColor(SettingsTheme.primaryText)
-                        Spacer(minLength: 0)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(SettingsTheme.secondaryText)
-                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-                    .background(SettingsTheme.field)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(SettingsTheme.stroke, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-
-                if isExpanded {
-                    VStack(spacing: 0) {
-                        ForEach(VolcengineEndpointKind.allCases) { kind in
-                            Button {
-                                selection = kind
-                                withAnimation(.easeOut(duration: 0.12)) { isExpanded = false }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Text(kind.displayName)
-                                        .font(.system(size: 13))
-                                        .foregroundColor(SettingsTheme.primaryText)
-                                    Spacer(minLength: 0)
-                                    if kind == selection {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 11, weight: .bold))
-                                            .foregroundStyle(SettingsTheme.green)
-                                    }
-                                }
-                                .padding(.horizontal, 12)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 32)
-                                .background(kind == selection ? SettingsTheme.green.opacity(0.08) : Color.clear)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                    .background(SettingsTheme.field)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(SettingsTheme.stroke, lineWidth: 1)
-                    )
-                }
-            }
-        }
-    }
-}
-
-private struct StyleTabSelector: View {
-    @Binding var selection: StyleTab
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(StyleTab.allCases) { tab in
-                SegmentButton(
-                    title: tab.title,
-                    isSelected: selection == tab
-                ) {
-                    selection = tab
-                }
-            }
-        }
-    }
-}
-
-private struct DefaultStylePreview: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("默认风格")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-            VStack(alignment: .leading, spacing: 7) {
-                Text("适合日常表达和工作沟通：保留原意、事实和语气，把表达改得更清晰、自然、有条理。")
-                Text("内容散乱时会主动理顺主线，突出结论、背景、问题、反馈、诉求或下一步。")
-                Text("长内容或信息点较多时，会优先拆成短段、分点或编号，提升阅读效率。")
-            }
-            .font(.system(size: 13))
-            .foregroundStyle(SettingsTheme.primaryText)
-            .lineSpacing(3)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(SettingsTheme.field)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(SettingsTheme.stroke, lineWidth: 1)
-            )
-        }
-    }
-}
-
-private struct PermissionRow: View {
-    let title: String
-    let granted: Bool
-    let openAction: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(SettingsTheme.secondaryText)
-                .frame(width: 88, alignment: .leading)
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(granted ? SettingsTheme.green : SettingsTheme.error)
-                    .frame(width: 7, height: 7)
-                Text(granted ? "已开启" : "未开启")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(granted ? SettingsTheme.green : SettingsTheme.error)
-            }
-            Spacer()
-            Button("打开", action: openAction)
-                .buttonStyle(SecondarySettingsButtonStyle())
-        }
-    }
-}
-
-private struct ThinkingModeToggle: View {
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Button {
-            withAnimation(.easeOut(duration: 0.16)) {
-                isOn.toggle()
-            }
-        } label: {
-            HStack(spacing: 10) {
-                Text("开启思考/推理模式")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(SettingsTheme.primaryText)
-                Spacer(minLength: 0)
-                Text(isOn ? "已开启" : "已关闭")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(isOn ? SettingsTheme.green : SettingsTheme.secondaryText)
-                ZStack(alignment: isOn ? .trailing : .leading) {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(isOn ? SettingsTheme.green.opacity(0.95) : SettingsTheme.field)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(isOn ? SettingsTheme.green.opacity(0.65) : SettingsTheme.stroke, lineWidth: 1)
-                        )
-                    Circle()
-                        .fill(isOn ? Color.black.opacity(0.78) : SettingsTheme.secondaryText)
-                        .frame(width: 14, height: 14)
-                        .padding(3)
-                }
-                .frame(width: 38, height: 20)
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 36)
-            .background(SettingsTheme.field)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isOn ? SettingsTheme.green.opacity(0.28) : SettingsTheme.stroke, lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct SegmentButton: View {
-    let title: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-                .frame(height: 32)
-                .foregroundStyle(isSelected ? Color.black.opacity(0.84) : SettingsTheme.secondaryText)
-                .background(isSelected ? SettingsTheme.green : SettingsTheme.field)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(isSelected ? SettingsTheme.green.opacity(0.6) : SettingsTheme.stroke, lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct PrimarySettingsButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(Color.black.opacity(0.84))
-            .padding(.horizontal, 18)
-            .frame(height: 36)
-            .background(SettingsTheme.green.opacity(configuration.isPressed ? 0.78 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-    }
-}
-
-private struct SecondarySettingsButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(SettingsTheme.primaryText)
-            .padding(.horizontal, 16)
-            .frame(height: 36)
-            .background(SettingsTheme.field.opacity(configuration.isPressed ? 0.65 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(SettingsTheme.stroke, lineWidth: 1)
-            )
-    }
-}
-
-private struct InlineSettingsButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .bold))
-            .foregroundStyle(SettingsTheme.green.opacity(configuration.isPressed ? 0.65 : 0.95))
     }
 }

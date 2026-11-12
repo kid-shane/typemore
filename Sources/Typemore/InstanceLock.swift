@@ -14,8 +14,9 @@ final class InstanceLock {
     }
 
     static func acquire() -> InstanceLock? {
+        let lockName = "typemore.lock"
         let lockURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("typemore.lock")
+            .appendingPathComponent(lockName)
         let fd = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard fd >= 0 else { return nil }
 

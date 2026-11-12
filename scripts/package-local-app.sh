@@ -4,10 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Typemore"
 BUNDLE_ID="com.typemore.local"
-VERSION="${VERSION:-${GITHUB_REF_NAME:-0.1.6}}"
+VERSION="${VERSION:-${GITHUB_REF_NAME:-0.1.8}}"
 VERSION="${VERSION#v}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 BUILD_DIR="$ROOT_DIR/.build/arm64-apple-macosx/release"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -19,10 +20,24 @@ DMG_PATH="$DIST_DIR/$APP_NAME-local.dmg"
 ICON_PNG="$DIST_DIR/$APP_NAME-icon.png"
 ICONSET_DIR="$DIST_DIR/$APP_NAME.iconset"
 ICON_ICNS="$RESOURCES_DIR/$APP_NAME.icns"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+NOTARIZE="${NOTARIZE:-0}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+STAPLE="${STAPLE:-$NOTARIZE}"
 
 cd "$ROOT_DIR"
 
 UNIVERSAL="${UNIVERSAL:-0}"
+
+if [[ "$NOTARIZE" == "1" && "$SIGN_IDENTITY" == "-" ]]; then
+  echo "NOTARIZE=1 requires SIGN_IDENTITY to use a Developer ID certificate." >&2
+  exit 1
+fi
+
+if [[ "$NOTARIZE" == "1" && -z "$NOTARY_PROFILE" ]]; then
+  echo "NOTARIZE=1 requires NOTARY_PROFILE to reference stored notarytool credentials." >&2
+  exit 1
+fi
 
 if [[ "$UNIVERSAL" == "1" ]]; then
   echo "Building universal (arm64 + x86_64) release binary..."
@@ -85,27 +100,49 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
 </dict>
 </plist>
 PLIST
 
-echo "Applying ad-hoc code signature..."
-codesign --force --deep --sign - "$APP_DIR"
-codesign --verify --deep --strict "$APP_DIR"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  echo "Applying ad-hoc code signature..."
+  codesign --force --deep --sign - "$APP_DIR"
+else
+  echo "Applying Developer ID code signature..."
+  codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
+fi
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 echo "Creating zip archive..."
 ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 
 echo "Creating dmg installer..."
-hdiutil detach "/Volumes/$APP_NAME" >/dev/null 2>&1 || true
-hdiutil detach "/Volumes/$APP_NAME 1" >/dev/null 2>&1 || true
+MOUNT_POINT=""
+detach_build_image() {
+  local attempt
+  for attempt in 1 2 3; do
+    if hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1; then
+      MOUNT_POINT=""
+      return 0
+    fi
+    sleep 1
+  done
+  hdiutil detach -force "$MOUNT_POINT" >/dev/null
+  MOUNT_POINT=""
+}
+cleanup_build_image() {
+  if [[ -n "$MOUNT_POINT" ]]; then
+    detach_build_image || true
+  fi
+}
+trap cleanup_build_image EXIT
 hdiutil create \
   -volname "$APP_NAME" \
   -size 32m \
@@ -150,9 +187,30 @@ if [[ "$LAYOUT_STATUS" -ne 0 ]]; then
 fi
 
 sync
-hdiutil detach "$MOUNT_POINT" >/dev/null
+detach_build_image
 hdiutil convert "$DMG_TEMP" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/dev/null
 rm -rf "$DMG_TEMP" "$DMG_ROOT"
+
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+  echo "Signing dmg installer..."
+  codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+  codesign --verify --verbose=2 "$DMG_PATH"
+fi
+
+if [[ "$NOTARIZE" == "1" ]]; then
+  echo "Submitting dmg for notarization..."
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  if [[ "$STAPLE" == "1" ]]; then
+    echo "Stapling notarization ticket..."
+    xcrun stapler staple "$DMG_PATH"
+    xcrun stapler validate "$DMG_PATH"
+    xcrun stapler staple "$APP_DIR"
+    xcrun stapler validate "$APP_DIR"
+    echo "Recreating zip archive with stapled app..."
+    rm -f "$ZIP_PATH"
+    ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
+  fi
+fi
 
 echo
 echo "Done."
@@ -163,5 +221,9 @@ echo
 echo "For first launch on another Mac:"
 echo "1. Open $APP_NAME-local.dmg."
 echo "2. Drag $APP_NAME.app to Applications."
-echo "3. Right-click $APP_NAME.app and choose Open."
+if [[ "$NOTARIZE" == "1" ]]; then
+  echo "3. Double-click $APP_NAME.app to open (notarized)."
+else
+  echo "3. Right-click $APP_NAME.app and choose Open."
+fi
 echo "4. Enable Accessibility and Input Monitoring permissions for $APP_NAME in System Settings."

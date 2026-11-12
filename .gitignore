@@ -38,3 +38,14 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Local previews and release working files
+outputs/
+
+# Signing credentials
+*.p12
+*.p8
+*.pem
+*.keychain
+*.keychain-db
+*.mobileprovision

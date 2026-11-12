@@ -8,6 +8,7 @@ let package = Package(
         .executable(name: "Typemore", targets: ["Typemore"])
     ],
     targets: [
-        .executableTarget(name: "Typemore")
+        .executableTarget(name: "Typemore"),
+        .testTarget(name: "TypemoreTests", dependencies: ["Typemore"])
     ]
 )

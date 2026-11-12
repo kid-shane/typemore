@@ -1,9 +1,11 @@
 # Privacy
 
-Typemore only processes text that you actively trigger for rewriting. This can be selected text, or the target text around the current cursor when no text is selected.
+Typemore processes text when you actively trigger rewriting or click the connection trial in settings. For rewriting in another app, this includes the selected text or the target text around the cursor and necessary surrounding context.
 
-When you use a real model provider, the target text and necessary surrounding context are sent to the endpoint and model configured in Typemore settings. Typemore does not run its own backend, does not collect analytics, and does not upload your API key to this repository.
+The text is sent directly to the model service selected in settings. API connections use the configured provider endpoint. ChatGPT account connections use the official Sign in with ChatGPT flow and the public Responses API, with `store: false` and streaming enabled. The OAuth request asks for account identity and permission to use the user's ChatGPT plan. Users can manage access and limits in ChatGPT settings.
 
-Typemore prefers the macOS Accessibility API to read and replace text. When an app is unreliable, Typemore temporarily uses the system clipboard to copy or paste, then restores the previous clipboard contents afterward. If you use a third-party clipboard manager, that manager may record the intermediate content. Avoid triggering Typemore in sensitive input fields.
+Doubao connections invoke the separately installed official Doubao CLI. Its login credentials and task history are managed by Doubao under its own terms and privacy rules. Typemore requests approval for tool operations and uses a temporary empty task directory for rewriting. Model providers and CLI services may retain data under their own policies.
 
-Your API key and settings are stored locally in this Mac's Application Support directory.
+Typemore does not run its own model backend, collect analytics, or bundle user credentials. API keys and ChatGPT OAuth credentials are stored in macOS Keychain. Non-secret connection settings, writing preferences, and shortcuts are stored locally in Application Support under Typemore/Public. Legacy settings are read for migration and kept unchanged. A Keychain write failure is reported and does not mark the configuration as saved.
+
+Typemore prefers the macOS Accessibility API to read and replace text. Where required, it temporarily uses the clipboard to copy or paste, then restores the previous clipboard contents. Third-party clipboard managers may record intermediate content. Avoid triggering Typemore in sensitive input fields.

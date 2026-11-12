@@ -6,6 +6,26 @@ enum KeychainStore {
     private static let service = "Typemore"
     private static let legacyAccount = "default-api-key"
 
+    static func readSecret(_ account: String) throws -> String? {
+        var query = baseQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data,
+              let value = String(data: data, encoding: .utf8) else {
+            throw ModelServiceError.message("钥匙串读取失败（\(status)），请解锁登录钥匙串后重试")
+        }
+        return value
+    }
+
+    static func writeSecret(_ account: String, _ value: String) throws {
+        guard saveAPIKey(value, account: account) else {
+            throw ModelServiceError.message("凭据未能保存到钥匙串，请解锁登录钥匙串后重新保存")
+        }
+    }
+
     static func loadAPIKey() -> String {
         loadAPIKey(account: legacyAccount)
     }

@@ -96,6 +96,7 @@ final class SystemTextService {
     private var nextSessionID = 0
 
     func captureText(onCopySent: @escaping (Int) -> Void) async throws -> CaptureResult {
+        try Task.checkCancellation()
         nextSessionID += 1
         let sessionID = nextSessionID
         let pasteboard = NSPasteboard.general
@@ -104,7 +105,8 @@ final class SystemTextService {
         let trusted = AXIsProcessTrusted()
         TMLog.write("capture#\(sessionID) start bundle=\(sourceBundleID ?? "nil") trusted=\(trusted) prevClipboardLen=\(previousClipboard.stringValue.count)")
 
-        let focusedDiag = await readFocusedTextDiagnosticWithRetry(sessionID: sessionID)
+        let focusedDiag = try await readFocusedTextDiagnosticWithRetry(sessionID: sessionID)
+        try Task.checkCancellation()
         TMLog.write("capture#\(sessionID) ax: source=\(focusedDiag.focusedSource ?? "nil") frontmost=\(focusedDiag.frontmostBundleID ?? "nil") pid=\(focusedDiag.frontmostPID) lookup=\(focusedDiag.focusLookup) attr=\(focusedDiag.attributeLookup) focusedOK=\(focusedDiag.focusedOK) role=\(focusedDiag.role ?? "nil") subrole=\(focusedDiag.subrole ?? "nil") valueOK=\(focusedDiag.valueOK) valueLen=\(focusedDiag.valueLen) selRangeOK=\(focusedDiag.selRangeOK) selLoc=\(focusedDiag.selLocation) selLen=\(focusedDiag.selLength)")
 
         if let focusedText = focusedDiag.focused, let capture = buildAXCapture(
@@ -121,8 +123,10 @@ final class SystemTextService {
 
         let sentinel = "__TYPEMORE_EMPTY_\(Date().timeIntervalSince1970)__"
 
+        try Task.checkCancellation()
         pasteboard.clearContents()
         pasteboard.setString(sentinel, forType: .string)
+        defer { previousClipboard.restore() }
         let sentinelChangeCount = pasteboard.changeCount
 
         do {
@@ -131,32 +135,27 @@ final class SystemTextService {
             TMLog.write("capture#\(sessionID) cmd+c posted")
         } catch {
             TMLog.write("capture#\(sessionID) cmd+c failed: \(error.localizedDescription)")
-            previousClipboard.restore()
             throw accessibilityError(error)
         }
 
-        let waited = (try? await waitForCopiedText(sentinel: sentinel, sentinelChangeCount: sentinelChangeCount)) ?? ""
+        let waited = try await waitForCopiedText(sentinel: sentinel, sentinelChangeCount: sentinelChangeCount)
+        try Task.checkCancellation()
         let fallbackSel = readFocusedSelectedTextFallback()?.trimmedSelection ?? ""
         var copiedText = waited.trimmedSelection.ifEmpty(fallbackSel)
         TMLog.write("capture#\(sessionID) copied chars=\(copiedText.count) waitedChars=\(waited.count) fallbackSelChars=\(fallbackSel.count)")
 
         if copiedText.isEmpty || copiedText == sentinel {
             if shouldTryFocusedAllSelectionFallback(for: sourceBundleID) {
-                do {
-                    copiedText = try await copyFocusedEditableContentViaKeyboard(
-                        sessionID: sessionID,
-                        maxCharacters: keyboardAllSelectionMaxCharacters
-                    )
-                } catch {
-                    previousClipboard.restore()
-                    throw error
-                }
+                copiedText = try await copyFocusedEditableContentViaKeyboard(
+                    sessionID: sessionID,
+                    maxCharacters: keyboardAllSelectionMaxCharacters
+                )
             }
             if copiedText.isEmpty, shouldTryLineSelectionFallback(for: sourceBundleID) {
-                copiedText = (try? await copyCurrentLineViaKeyboard(sessionID: sessionID)) ?? ""
+                copiedText = try await copyCurrentLineViaKeyboard(sessionID: sessionID)
             }
         }
-        previousClipboard.restore()
+        try Task.checkCancellation()
 
         guard !copiedText.isEmpty, copiedText != sentinel else {
             TMLog.write("capture#\(sessionID) noSelectedText after fallback")
@@ -174,12 +173,15 @@ final class SystemTextService {
         )
     }
 
-    func paste(_ text: String, into bundleID: String?, replacementRange: NSRange?, previousClipboard: ClipboardSnapshot) async throws {
+    func paste(_ text: String, into bundleID: String?, replacementRange: NSRange?,
+               previousClipboard: ClipboardSnapshot, onWillCommit: (() -> Void)? = nil) async throws {
+        try Task.checkCancellation()
         TMLog.write("paste start bundle=\(bundleID ?? "nil") textLen=\(text.count) range=\(String(describing: replacementRange))")
         if let bundleID {
             try await activateIfNeeded(bundleID: bundleID)
         }
 
+        try Task.checkCancellation()
         if let replacementRange {
             do {
                 try setFocusedSelectedRange(replacementRange)
@@ -190,19 +192,21 @@ final class SystemTextService {
             }
         }
 
+        try Task.checkCancellation()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        defer { previousClipboard.restore() }
 
         do {
-            try await sendCommandKeystroke("v")
+            try await sendCommandKeystroke("v", onWillPost: onWillCommit)
             TMLog.write("paste: cmd+v posted")
-            try await Task.sleep(nanoseconds: 90_000_000)
+            let pasteDelay = text.utf8.count > 8000 ? 400_000_000 : 90_000_000
+            try await Task.sleep(nanoseconds: UInt64(pasteDelay))
         } catch {
             TMLog.write("paste: cmd+v failed: \(error.localizedDescription)")
             throw accessibilityError(error)
         }
 
-        previousClipboard.restore()
         TMLog.write("paste end")
     }
 
@@ -246,6 +250,7 @@ final class SystemTextService {
         let pasteboard = NSPasteboard.general
         let maxAttempts = 28
         for attempt in 0..<maxAttempts {
+            try Task.checkCancellation()
             if pasteboard.changeCount != sentinelChangeCount {
                 let value = pasteboard.string(forType: .string) ?? ""
                 if !value.isEmpty, value != sentinel {
@@ -263,16 +268,18 @@ final class SystemTextService {
     }
 
     private func activateIfNeeded(bundleID: String) async throws {
+        try Task.checkCancellation()
         guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier != bundleID else { return }
         activate(bundleID: bundleID)
         try await Task.sleep(nanoseconds: 50_000_000)
     }
 
-    private func sendCommandKeystroke(_ key: String) async throws {
-        try await sendKeystroke(key, flags: .maskCommand)
+    private func sendCommandKeystroke(_ key: String, onWillPost: (() -> Void)? = nil) async throws {
+        try await sendKeystroke(key, flags: .maskCommand, onWillPost: onWillPost)
     }
 
-    private func sendKeystroke(_ key: String, flags: CGEventFlags = []) async throws {
+    private func sendKeystroke(_ key: String, flags: CGEventFlags = [], onWillPost: (() -> Void)? = nil) async throws {
+        try Task.checkCancellation()
         guard AXIsProcessTrusted() else {
             throw TypemoreError.accessibilityRequired
         }
@@ -284,6 +291,8 @@ final class SystemTextService {
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         keyDown?.flags = flags
         keyUp?.flags = flags
+        try Task.checkCancellation()
+        onWillPost?()
         keyDown?.post(tap: .cghidEventTap)
         keyUp?.post(tap: .cghidEventTap)
         try await Task.sleep(nanoseconds: 25_000_000)
@@ -310,6 +319,7 @@ final class SystemTextService {
     }
 
     private func copyFocusedEditableContentViaKeyboard(sessionID: Int, maxCharacters: Int) async throws -> String {
+        try Task.checkCancellation()
         let pasteboard = NSPasteboard.general
         let sentinel = "__TYPEMORE_ALL_EMPTY_\(Date().timeIntervalSince1970)__"
         pasteboard.clearContents()
@@ -321,19 +331,21 @@ final class SystemTextService {
         try await Task.sleep(nanoseconds: 55_000_000)
         try await sendCommandKeystroke("c")
 
-        let copied = (try? await waitForCopiedText(sentinel: sentinel, sentinelChangeCount: sentinelChangeCount)) ?? ""
+        let copied = try await waitForCopiedText(sentinel: sentinel, sentinelChangeCount: sentinelChangeCount)
+        try Task.checkCancellation()
         let trimmed = copied.trimmedSelection
         TMLog.write("capture#\(sessionID) all-select fallback copied chars=\(trimmed.count) rawChars=\(copied.count)")
         guard trimmed != sentinel else { return "" }
         guard trimmed.count <= maxCharacters else {
             TMLog.write("capture#\(sessionID) all-select fallback tooLong chars=\(trimmed.count) max=\(maxCharacters)")
-            try? await sendKeystroke("right")
+            try await sendKeystroke("right")
             throw TypemoreError.inputTooLong(maxCharacters)
         }
         return trimmed
     }
 
     private func copyCurrentLineViaKeyboard(sessionID: Int) async throws -> String {
+        try Task.checkCancellation()
         let pasteboard = NSPasteboard.general
         let sentinel = "__TYPEMORE_LINE_EMPTY_\(Date().timeIntervalSince1970)__"
         pasteboard.clearContents()
@@ -347,7 +359,8 @@ final class SystemTextService {
         try await Task.sleep(nanoseconds: 35_000_000)
         try await sendCommandKeystroke("c")
 
-        let copied = (try? await waitForCopiedText(sentinel: sentinel, sentinelChangeCount: sentinelChangeCount)) ?? ""
+        let copied = try await waitForCopiedText(sentinel: sentinel, sentinelChangeCount: sentinelChangeCount)
+        try Task.checkCancellation()
         let trimmed = copied.trimmedSelection
         TMLog.write("capture#\(sessionID) line-select fallback copied chars=\(trimmed.count) rawChars=\(copied.count)")
         return trimmed == sentinel ? "" : trimmed
@@ -357,7 +370,8 @@ final class SystemTextService {
         readFocusedTextDiagnostic().focused
     }
 
-    private func readFocusedTextDiagnosticWithRetry(sessionID: Int) async -> FocusedDiagnostic {
+    private func readFocusedTextDiagnosticWithRetry(sessionID: Int) async throws -> FocusedDiagnostic {
+        try Task.checkCancellation()
         // 先尝试唤醒 frontmost 应用的 AX 树（针对 Chromium / Electron 这类懒加载 a11y 的应用）
         if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier, pid > 0 {
             wakeUpAccessibility(pid: pid, sessionID: sessionID)
@@ -366,8 +380,9 @@ final class SystemTextService {
         var last = FocusedDiagnostic()
         for (attempt, delay) in delays.enumerated() {
             if delay > 0 {
-                try? await Task.sleep(nanoseconds: delay)
+                try await Task.sleep(nanoseconds: delay)
             }
+            try Task.checkCancellation()
             let diag = readFocusedTextDiagnostic()
             last = diag
             if diag.focused != nil {
@@ -552,8 +567,8 @@ final class SystemTextService {
 
     private func nearbyParagraphRange(cursor: Int, text: NSString) -> NSRange {
         let textLength = text.length
-        let windowStart = max(0, cursor - 500)
-        let windowEnd = min(textLength, cursor + 300)
+        let windowStart = 0
+        let windowEnd = textLength
         var start = cursor
         while start > windowStart, !isNewline(text.character(at: start - 1)) {
             start -= 1
@@ -563,7 +578,7 @@ final class SystemTextService {
             end += 1
         }
         if start == end {
-            return NSRange(location: windowStart, length: windowEnd - windowStart)
+            return NSRange(location: cursor, length: 0)
         }
         return NSRange(location: start, length: end - start)
     }
@@ -695,7 +710,6 @@ enum TypemoreError: LocalizedError {
     case inputTooLong(Int)
     case invalidModelResponse
     case reasoningOnlyModelResponse
-
     var errorDescription: String? {
         switch self {
         case .noSelectedText: return "没有检测到选中文字"
@@ -703,7 +717,7 @@ enum TypemoreError: LocalizedError {
         case .appleScript(let message): return message
         case .inputTooLong(let maxCharacters): return "当前输入框内容超过 \(maxCharacters) 字，请手动选中要改写的部分"
         case .invalidModelResponse: return "模型没有返回可用文本"
-        case .reasoningOnlyModelResponse: return "模型只返回了思考内容，请关闭思考/推理模式或选择非思考模型后重试"
+        case .reasoningOnlyModelResponse: return "模型未返回正文，请关闭思考模式后重试"
         }
     }
 }

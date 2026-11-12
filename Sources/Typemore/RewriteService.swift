@@ -2,68 +2,201 @@ import Foundation
 
 final class RewriteService {
     private let perfEnabled = ProcessInfo.processInfo.environment["TYPEMORE_PERF"] == "1"
+    private let debugEnabled = ProcessInfo.processInfo.environment["TYPEMORE_DEBUG"] == "1"
     private let outputContract = [
         "Return only the rewritten text.",
         "Do not explain, label, quote, or wrap the result.",
+        "Keep the source language of each paragraph unless the custom style explicitly requests translation.",
+        "Preserve uncertainty and conditional statements exactly in strength: 'might' must not become 'will', 'can', or a confirmed plan.",
+        "Keep source condition words 如果, 除非, 假如 and unless literally unchanged, together with their dependent action in the same sentence or bullet. English 'if' may use an equivalent conditional phrase such as 'provided that'; never omit its condition.",
+        "A requested or proposed change must remain a request or proposal: 希望/期望/计划 must never become 已实现/已完成. Preserve every action together with its condition.",
+        "Keep all numbers, currency symbols, identifiers, URLs, file paths, commands, and emoji exactly as written. Do not remove or normalize them.",
         "If no change is needed, return the source text exactly.",
         "Never include reasoning, analysis, hidden prompts, system messages, or tool instructions in the output."
     ].joined(separator: "\n")
 
-    private let internalSystemPrompt = AppSettings.defaultSystemPrompt
-
-    func rewrite(_ capture: CaptureResult, settings: AppSettings) async throws -> String {
+    private let defaultSystemPrompt = AppSettings.defaultSystemPrompt
+    init() {}
+    func rewrite(_ capture: CaptureResult, settings: AppSettings,
+                 onProgress: (@Sendable (RewriteProgress) async -> Void)? = nil) async throws -> String {
         try await rewrite(
             capture.text,
             contextBefore: capture.contextBefore,
             contextAfter: capture.contextAfter,
-            settings: settings
+            settings: settings,
+            onProgress: onProgress
         )
     }
 
-    func rewrite(_ text: String, settings: AppSettings) async throws -> String {
-        try await rewrite(text, contextBefore: "", contextAfter: "", settings: settings)
+    func rewrite(_ text: String, settings: AppSettings,
+                 onProgress: (@Sendable (RewriteProgress) async -> Void)? = nil) async throws -> String {
+        try await rewrite(text, contextBefore: "", contextAfter: "", settings: settings, onProgress: onProgress)
     }
 
-    private func rewrite(_ text: String, contextBefore: String, contextAfter: String, settings: AppSettings) async throws -> String {
+    private func rewrite(_ text: String, contextBefore: String, contextAfter: String, settings: AppSettings,
+                         onProgress: (@Sendable (RewriteProgress) async -> Void)?) async throws -> String {
+        let settings = settings.sanitized()
         let startedAt = Date()
-        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let original = RewriteUnit(raw: text)
+        let source = original.text
         guard !source.isEmpty else { throw TypemoreError.noSelectedText }
 
         if settings.provider == .demo {
             return demoRewrite(source, mode: settings.defaultMode)
         }
-        guard !settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw RewriteError.missingAPIKey
+        if settings.provider.requiresAPIKey {
+            guard !settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RewriteError.missingAPIKey
+            }
+        }
+        if settings.provider != .doubao && settings.model.isEmpty {
+            throw RewriteError.missingModel
         }
 
         let instruction = buildInstruction(settings: settings)
+        if debugEnabled {
+            TMLog.write("rewrite payload: mode=\(settings.defaultMode.rawValue) chars=\(source.count)")
+        }
         let output: String
-        switch settings.provider {
-        case .volcengine, .compatible:
-            output = try await rewriteWithChatCompletions(source, contextBefore: contextBefore, contextAfter: contextAfter, instruction: instruction, settings: settings)
-        case .openai:
-            output = try await rewriteWithResponses(source, contextBefore: contextBefore, contextAfter: contextAfter, instruction: instruction, settings: settings)
-        case .demo:
-            output = demoRewrite(source, mode: settings.defaultMode)
+        if source.count > LongTextRewritePlan.unitSize {
+            output = try await rewriteLongText(source, before: contextBefore, after: contextAfter,
+                                               settings: settings, onProgress: onProgress)
+        } else {
+            do {
+                let candidate = try await requestRewrite(source, contextBefore: contextBefore, contextAfter: contextAfter,
+                                                         instruction: instruction, settings: settings)
+                try RewriteIntegrity.validate(source: source, output: candidate,
+                                              preserveLanguage: shouldPreserveLanguage(settings))
+                output = candidate
+            } catch {
+                try Task.checkCancellation()
+                guard isRecoverable(error) else { throw error }
+                output = try await rewriteChunk(
+                    RewriteChunk(units: [RewriteUnit(raw: source)], contextBefore: contextBefore, contextAfter: contextAfter),
+                    settings: settings, lane: 0
+                )
+            }
+            await onProgress?(RewriteProgress(completed: 1, total: 1))
         }
         perfLog("rewrite total: \(Self.formatDuration(since: startedAt)), chars=\(source.count), mode=\(settings.defaultMode.rawValue)")
-        return output
+        return original.restoringWhitespace(around: output)
     }
 
-    private func rewriteWithChatCompletions(_ text: String, contextBefore: String, contextAfter: String, instruction: String, settings: AppSettings) async throws -> String {
+    private func requestRewrite(_ source: String, contextBefore: String, contextAfter: String,
+                                instruction: String, settings: AppSettings, envelope: RewriteEnvelope? = nil,
+                                lane: Int = 0) async throws -> String {
+        let system = buildSystemPrompt(settings: settings) + (envelope.map { "\n\n" + $0.instruction } ?? "")
+        let message = envelope.map {
+            instruction + "\n\n" + $0.instruction + "\n\n" + $0.payload(before: contextBefore, after: contextAfter)
+        } ?? buildRewriteRequest(instruction: instruction, text: source,
+                                 contextBefore: String(contextBefore.suffix(LongTextRewritePlan.contextSize)),
+                                 contextAfter: String(contextAfter.prefix(LongTextRewritePlan.contextSize)))
+        switch settings.provider {
+        case .volcengine, .deepseek, .bailian, .kimi, .gemini, .openrouter, .compatible, .ollama:
+            return try await rewriteWithChatCompletions(source, system: system, message: message, settings: settings)
+        case .openai:
+            return try await rewriteWithResponses(source, system: system, message: message, settings: settings)
+        case .chatgpt:
+            guard let id = settings.activeConnectionID else { throw ModelServiceError.message("请先登录 ChatGPT") }
+            return try await ChatGPTAuth.shared.rewrite(system: system, message: message, model: settings.model, connectionID: id)
+        case .doubao:
+            return try await DoubaoCLI.rewrite(system: system, message: message, settings: settings)
+        case .anthropic:
+            return try await rewriteWithAnthropic(source, system: system, message: message, settings: settings)
+        case .demo:
+            return demoRewrite(source, mode: settings.defaultMode)
+        }
+    }
+
+    private func rewriteLongText(_ source: String, before: String, after: String, settings: AppSettings,
+                                 onProgress: (@Sendable (RewriteProgress) async -> Void)?) async throws -> String {
+        let chunks = LongTextRewritePlan.chunks(for: source, before: before, after: after)
+        await onProgress?(RewriteProgress(completed: 0, total: chunks.count))
+        // 两条独立会话：限定并发数，避免全文请求耗尽上下文或瞬间打满服务额度。
+        return try await withThrowingTaskGroup(of: (Int, Int, String).self) { group in
+            var output = Array(repeating: "", count: chunks.count)
+            var next = 0
+            var completed = 0
+            func enqueue(_ index: Int, lane: Int) {
+                group.addTask {
+                    let text = try await self.rewriteChunk(chunks[index], settings: settings, lane: lane)
+                    return (index, lane, text)
+                }
+            }
+            for lane in 0..<min(2, chunks.count) { enqueue(next, lane: lane); next += 1 }
+            while let (index, lane, text) = try await group.next() {
+                output[index] = text
+                completed += 1
+                await onProgress?(RewriteProgress(completed: completed, total: chunks.count))
+                if next < chunks.count { enqueue(next, lane: lane); next += 1 }
+            }
+            return output.joined()
+        }
+    }
+
+    private func rewriteChunk(_ chunk: RewriteChunk, settings: AppSettings, lane: Int, depth: Int = 0) async throws -> String {
+        try Task.checkCancellation()
+        let source = chunk.units.map(\.raw).joined()
+        if source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return source }
+        let envelope = RewriteEnvelope(units: chunk.units)
+        var lastError: Error = RewriteError.incompleteOutput
+        for attempt in 0..<2 {
+            do {
+                let raw = try await requestRewrite(source, contextBefore: chunk.contextBefore, contextAfter: chunk.contextAfter,
+                                                   instruction: buildInstruction(settings: settings), settings: settings,
+                                                   envelope: envelope, lane: lane)
+                return try envelope.decode(raw, preserveLanguage: shouldPreserveLanguage(settings))
+            } catch {
+                try Task.checkCancellation()
+                guard isRecoverable(error) else { throw error }
+                lastError = error
+                TMLog.write("rewrite chunk retry depth=\(depth) attempt=\(attempt + 1) chars=\(source.count)")
+                if case RewriteError.contextLimit = error { break }
+                if attempt == 0 { try await Task.sleep(nanoseconds: 300_000_000) }
+            }
+        }
+        guard depth < 3, source.count > 300 else { throw lastError }
+        let smaller = LongTextRewritePlan.units(for: source, limit: max(250, min(800, source.count / 2)))
+        guard smaller.count > 1 else { throw lastError }
+        var result = ""
+        for (index, unit) in smaller.enumerated() {
+            let previous = index > 0 ? smaller[index - 1].raw : chunk.contextBefore
+            let following = index + 1 < smaller.count ? smaller[index + 1].raw : chunk.contextAfter
+            result += try await rewriteChunk(RewriteChunk(units: [unit], contextBefore: String(previous.suffix(320)),
+                                                         contextAfter: String(following.prefix(320))),
+                                             settings: settings, lane: lane, depth: depth + 1)
+        }
+        return result
+    }
+
+    private func isRecoverable(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        if case RewriteError.apiStatus(let status, _) = error {
+            return status == 408 || status == 429 || status >= 500
+        }
+        if case RewriteError.timeout = error { return true }
+        if case RewriteError.incompleteOutput = error { return true }
+        if case RewriteError.contextLimit = error { return true }
+        if case TypemoreError.invalidModelResponse = error { return true }
+        return (error as NSError).domain == NSURLErrorDomain
+    }
+
+    private func shouldPreserveLanguage(_ settings: AppSettings) -> Bool {
+        settings.defaultMode == .clear || settings.customStyle.contains("保持原语言") ||
+            settings.customStyle.contains("保留原语言")
+    }
+
+    private func rewriteWithChatCompletions(_ text: String, system: String, message: String, settings: AppSettings) async throws -> String {
         let startedAt = Date()
         let url = try validatedURL(chatCompletionsEndpoint(settings.endpoint))
         let thinking = chatCompletionsThinkingConfig(settings: settings)
-        let body = ChatRequest(
-            model: settings.model,
-            messages: [
-                ChatMessage(role: "system", content: buildSystemPrompt(settings: settings)),
-                ChatMessage(role: "user", content: buildRewriteRequest(instruction: instruction, text: text, contextBefore: contextBefore, contextAfter: contextAfter))
-            ],
-            temperature: 0.2,
-            maxTokens: maxOutputTokens(for: text),
-            thinking: thinking
-        )
+        var body: [String: Any] = [
+            "model": settings.model,
+            "messages": [["role": "system", "content": system], ["role": "user", "content": message]],
+            "max_tokens": maxOutputTokens(for: text), "stream": true
+        ]
+        if let thinking { body["thinking"] = ["type": thinking.type] }
+        if settings.provider == .bailian { body["enable_thinking"] = settings.thinkingEnabled }
 
         do {
             let outputText = try await performChatCompletions(body: body, url: url, settings: settings)
@@ -73,35 +206,44 @@ final class RewriteService {
             guard thinking != nil, shouldRetryWithoutThinkingParameter(error) else {
                 throw error
             }
-            TMLog.write("chat completions thinking parameter rejected, retrying without thinking field: \(error.localizedDescription)")
-            let fallbackBody = ChatRequest(
-                model: body.model,
-                messages: body.messages,
-                temperature: body.temperature,
-                maxTokens: body.maxTokens,
-                thinking: nil
-            )
+            TMLog.write("chat completions thinking parameter rejected, retrying without thinking field")
+            var fallbackBody = body
+            fallbackBody.removeValue(forKey: "thinking")
             let outputText = try await performChatCompletions(body: fallbackBody, url: url, settings: settings)
             perfLog("api response fallback: \(Self.formatDuration(since: startedAt))")
             return outputText
         }
     }
 
-    private func performChatCompletions(body: ChatRequest, url: URL, settings: AppSettings) async throws -> String {
+    private func performChatCompletions(body: [String: Any], url: URL, settings: AppSettings) async throws -> String {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(settings.apiKey)", forHTTPHeaderField: "Authorization")
+        ModelServiceClient.authorize(&request, settings: settings)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = requestTimeout(for: body.sourceTextForTimeout)
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 90
 
-        let (data, response) = try await perform(request)
-        perfLog("api response bytes=\(data.count), thinking=\(body.thinking?.type ?? "omitted")")
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        var raw = "", stream = ChatCompletionStream(), isStream = false
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            for try await line in bytes.lines { raw += line; if raw.utf8.count > 32_768 { break } }
+            try validate(response: response, data: Data(raw.utf8))
+        }
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            if line.hasPrefix("data:") { isStream = true; try stream.consume(line) }
+            else if !isStream { raw += line }
+        }
+        if isStream { return try stream.result() }
+        let data = Data(raw.utf8)
         try validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
-        guard let message = decoded.choices.first?.message else {
+        guard let choice = decoded.choices.first else {
             throw TypemoreError.invalidModelResponse
         }
+        if choice.finishReason == "length" { throw RewriteError.incompleteOutput }
+        if choice.finishReason == "content_filter" { throw RewriteError.api("模型未能返回完整改写，请调整原文后重试") }
+        let message = choice.message
         let outputText = message.finalText
         guard !outputText.isEmpty else {
             if message.hasReasoningContent {
@@ -113,7 +255,7 @@ final class RewriteService {
     }
 
     private func chatCompletionsThinkingConfig(settings: AppSettings) -> ThinkingConfig? {
-        guard settings.provider == .volcengine || settings.provider == .compatible else { return nil }
+        guard [.volcengine, .deepseek, .kimi].contains(settings.provider) else { return nil }
         return ThinkingConfig(type: settings.thinkingEnabled ? "enabled" : "disabled")
     }
 
@@ -122,16 +264,15 @@ final class RewriteService {
         return status == 400 || status == 422
     }
 
-    private func rewriteWithResponses(_ text: String, contextBefore: String, contextAfter: String, instruction: String, settings: AppSettings) async throws -> String {
+    private func rewriteWithResponses(_ text: String, system: String, message: String, settings: AppSettings) async throws -> String {
         let startedAt = Date()
-        let url = try validatedURL(settings.endpoint)
+        let url = try validatedURL(ModelServiceClient.baseURL(settings.endpoint) + "/responses")
         let body = ResponsesRequest(
             model: settings.model,
             input: [
-                ResponsesInput(role: "system", content: [ResponsesContent(type: "input_text", text: buildSystemPrompt(settings: settings))]),
-                ResponsesInput(role: "user", content: [ResponsesContent(type: "input_text", text: buildRewriteRequest(instruction: instruction, text: text, contextBefore: contextBefore, contextAfter: contextAfter))])
+                ResponsesInput(role: "system", content: [ResponsesContent(type: "input_text", text: system)]),
+                ResponsesInput(role: "user", content: [ResponsesContent(type: "input_text", text: message)])
             ],
-            temperature: 0.2,
             maxOutputTokens: maxOutputTokens(for: text)
         )
         var request = URLRequest(url: url)
@@ -145,17 +286,45 @@ final class RewriteService {
         perfLog("api response: \(Self.formatDuration(since: startedAt)), bytes=\(data.count)")
         try validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(ResponsesResponse.self, from: data)
+        if let status = decoded.status, status != "completed" { throw RewriteError.incompleteOutput }
         let outputText = decoded.outputText ?? decoded.output?.flatMap { item in
-            item.content?.compactMap { $0.text } ?? []
+            guard item.type == nil || item.type == "message" else { return [String]() }
+            return item.content?.filter { $0.type == nil || $0.type == "output_text" }
+                .compactMap { $0.text } ?? []
         }.joined(separator: "\n")
-        guard let outputText, !outputText.isEmpty else { throw TypemoreError.invalidModelResponse }
+        guard let outputText = outputText?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !outputText.isEmpty else { throw TypemoreError.invalidModelResponse }
         return outputText
+    }
+
+    private func rewriteWithAnthropic(_ text: String, system: String, message: String, settings: AppSettings) async throws -> String {
+        var request = URLRequest(url: try validatedURL(ModelServiceClient.baseURL(settings.endpoint) + "/messages"))
+        request.httpMethod = "POST"
+        ModelServiceClient.authorize(&request, settings: settings)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = requestTimeout(for: text)
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": settings.model, "max_tokens": maxOutputTokens(for: text), "system": system,
+            "messages": [["role": "user", "content": message]]
+        ])
+        let (data, response) = try await perform(request)
+        try validate(response: response, data: data)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        if json["stop_reason"] as? String == "max_tokens" { throw RewriteError.incompleteOutput }
+        let result = (json["content"] as? [[String: Any]] ?? [])
+            .filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }.joined()
+        guard !result.isEmpty else { throw TypemoreError.invalidModelResponse }
+        return result
     }
 
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
             let rawMessage = (try? JSONDecoder().decode(APIErrorEnvelope.self, from: data))?.error?.message
+            let lower = (rawMessage ?? "").lowercased()
+            if lower.contains("context"), lower.contains("length") || lower.contains("limit") || lower.contains("exceed") {
+                throw RewriteError.contextLimit
+            }
             throw RewriteError.apiStatus(
                 status: http.statusCode,
                 message: friendlyAPIError(status: http.statusCode, rawMessage: rawMessage)
@@ -193,7 +362,7 @@ final class RewriteService {
     }
 
     private func buildSystemPrompt(settings: AppSettings) -> String {
-        [internalSystemPrompt, outputContract].joined(separator: "\n\n")
+        [defaultSystemPrompt, outputContract].joined(separator: "\n\n")
     }
 
     private func buildRewriteRequest(instruction: String, text: String, contextBefore: String, contextAfter: String) -> String {
@@ -279,8 +448,9 @@ final class RewriteService {
     }
 
     private func maxOutputTokens(for text: String) -> Int {
-        let estimatedInputTokens = max(24, text.count / 2)
-        return min(900, max(96, estimatedInputTokens * 2 + 48))
+        // UTF-8 字节估计兼顾中文、英文和 emoji；为改写扩展及传输标记留出余量。
+        let estimatedInputTokens = max(64, text.utf8.count / 2)
+        return min(12000, max(512, estimatedInputTokens * 2 + 768))
     }
 
     private func requestTimeout(for text: String) -> TimeInterval {
@@ -313,41 +483,27 @@ final class RewriteService {
 
 enum RewriteError: LocalizedError {
     case missingAPIKey
+    case missingModel
     case api(String)
     case apiStatus(status: Int, message: String)
     case timeout
     case invalidEndpoint
     case insecureEndpoint
+    case incompleteOutput
+    case contextLimit
 
     var errorDescription: String? {
         switch self {
         case .missingAPIKey: return "请先配置 API Key"
+        case .missingModel: return "请先选择或填写模型"
         case .api(let message): return message
         case .apiStatus(_, let message): return message
         case .timeout: return "模型响应超时，请稍后再试"
         case .invalidEndpoint: return "Base URL 格式不正确"
         case .insecureEndpoint: return "Base URL 需要使用 HTTPS；本地 localhost 调试除外"
+        case .incompleteOutput: return "模型返回的改写不完整，原文已保留，请重试"
+        case .contextLimit: return "模型上下文不足，原文已保留，请换模型重试"
         }
-    }
-}
-
-private struct ChatRequest: Encodable {
-    let model: String
-    let messages: [ChatMessage]
-    let temperature: Double
-    let maxTokens: Int
-    let thinking: ThinkingConfig?
-
-    var sourceTextForTimeout: String {
-        messages.last?.content ?? ""
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case model
-        case messages
-        case temperature
-        case maxTokens = "max_tokens"
-        case thinking
     }
 }
 
@@ -379,6 +535,12 @@ private struct ChatResponse: Decodable {
 
     struct Choice: Decodable {
         let message: ChatMessageContent
+        let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case finishReason = "finish_reason"
+        }
     }
 
     struct ChatMessageContent: Decodable {
@@ -449,13 +611,13 @@ private enum FlexibleContent: Decodable {
 private struct ResponsesRequest: Encodable {
     let model: String
     let input: [ResponsesInput]
-    let temperature: Double
     let maxOutputTokens: Int
+    let store = false
 
     enum CodingKeys: String, CodingKey {
         case model
         case input
-        case temperature
+        case store
         case maxOutputTokens = "max_output_tokens"
     }
 }
@@ -471,15 +633,18 @@ private struct ResponsesContent: Codable {
 }
 
 private struct ResponsesResponse: Decodable {
+    let status: String?
     let outputText: String?
     let output: [OutputItem]?
 
     enum CodingKeys: String, CodingKey {
+        case status
         case outputText = "output_text"
         case output
     }
 
     struct OutputItem: Decodable {
+        let type: String?
         let content: [ResponsesContent]?
     }
 }
@@ -489,5 +654,28 @@ private struct APIErrorEnvelope: Decodable {
 
     struct APIError: Decodable {
         let message: String?
+    }
+}
+
+struct ChatCompletionStream {
+    private var text = ""
+    private var completed = false
+    mutating func consume(_ line: String) throws {
+        guard line.hasPrefix("data:") else { return }
+        let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        if payload == "[DONE]" { completed = true; return }
+        guard let data = payload.data(using: .utf8), let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if event["error"] != nil { throw ModelServiceError.message("模型服务中断了请求，请稍后重试") }
+        guard let choice = (event["choices"] as? [[String: Any]])?.first else { return }
+        if let reason = choice["finish_reason"] as? String {
+            if reason == "length" { throw RewriteError.incompleteOutput }
+            guard reason == "stop" else { throw TypemoreError.invalidModelResponse }
+            completed = true
+        }
+        if let delta = choice["delta"] as? [String: Any] { text += delta["content"] as? String ?? "" }
+    }
+    func result() throws -> String {
+        guard completed, !text.isEmpty else { throw RewriteError.incompleteOutput }
+        return text
     }
 }

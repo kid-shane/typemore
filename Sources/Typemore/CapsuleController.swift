@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 final class CapsuleModel: ObservableObject {
     @Published var state: CapsuleState = .loading("读取中")
+    @Published var cancelAction: (() -> Void)?
     var undoAction: (() -> Void)?
 }
 
@@ -15,39 +16,42 @@ enum CapsuleState: Equatable {
     var title: String {
         switch self {
         case .loading(let title): return title
-        case .done: return "已改写"
+        case .done: return "已润色"
         case .undone: return "已撤回"
         }
     }
-
     var isLoading: Bool {
         if case .loading = self { return true }
         return false
     }
-
-    var showDivider: Bool {
-        if case .done = self { return true }
-        return false
+    var compactTitle: String {
+        // 极长文只显示完整分段数字，避免为了状态词截掉实际进度。
+        if case .loading(let title) = self, title.hasPrefix("润色中 "), title.count > 11 {
+            return String(title.dropFirst(4))
+        }
+        return title
     }
+}
 
-    var showAction: Bool {
-        if case .done = self { return true }
-        return false
-    }
-
-    var actionTitle: String {
-        if case .done = self { return "撤回" }
-        return ""
-    }
+private enum CapsuleLayout {
+    static let width: CGFloat = 156
+    static let height: CGFloat = 34
+    static let shadowPadding: CGFloat = 10
+    static let bottomGap: CGFloat = 12
 }
 
 @MainActor
 final class CapsuleController {
     private let model = CapsuleModel()
     private var visibilityToken = 0
+    private var placementScreen: NSScreen?
     private lazy var panel: NSPanel = {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 132, height: 30),
+            contentRect: NSRect(
+                x: 0, y: 0,
+                width: CapsuleLayout.width + CapsuleLayout.shadowPadding * 2,
+                height: CapsuleLayout.height + CapsuleLayout.shadowPadding * 2
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -63,45 +67,50 @@ final class CapsuleController {
         return panel
     }()
 
-    func showLoading(_ title: String) {
+    func showLoading(_ title: String, cancel: (() -> Void)? = nil) {
+        model.undoAction = nil
+        model.cancelAction = cancel
         model.state = .loading(title)
         show()
     }
-
     func showDone(undo: @escaping () -> Void) {
+        model.cancelAction = nil
         model.undoAction = undo
         model.state = .done
         show()
     }
-
     func showUndone() {
+        model.cancelAction = nil
+        model.undoAction = nil
         model.state = .undone
         show()
         hide(after: 0.9)
     }
-
     func hide(after seconds: TimeInterval = 4.2) {
         let token = visibilityToken
+        if seconds <= 0 {
+            visibilityToken += 1
+            model.cancelAction = nil
+            panel.orderOut(nil)
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
             guard let self, self.visibilityToken == token else { return }
             self.panel.orderOut(nil)
         }
     }
-
     private func show() {
         visibilityToken += 1
-        panel.setContentSize(NSSize(width: 132, height: 30))
-        positionBottomCenter()
+        // 触发时记录输入所在屏幕，后续进度与完成状态沿用，避免鼠标移动导致跳屏。
+        if !panel.isVisible {
+            placementScreen = NSScreen.main ?? NSScreen.screens.first
+        }
+        FloatingPanelPosition.bottomCenter(
+            panel,
+            on: placementScreen,
+            bottomInset: CapsuleLayout.bottomGap - CapsuleLayout.shadowPadding
+        )
         panel.orderFrontRegardless()
-    }
-
-    private func positionBottomCenter() {
-        guard let screen = NSScreen.main else { return }
-        let frame = screen.visibleFrame
-        let size = panel.frame.size
-        let x = frame.midX - size.width / 2
-        let y = frame.minY + 104
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 }
 
@@ -109,137 +118,57 @@ struct CapsuleView: View {
     @ObservedObject var model: CapsuleModel
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             if model.state.isLoading {
-                BreathingOrb()
-                Text(model.state.title)
-                    .font(.system(size: 12, weight: .bold))
-                LoadingDots()
+                ProgressView().controlSize(.small).scaleEffect(0.8).frame(width: 14, height: 14)
             } else {
-                Text(model.state.title)
-                    .font(.system(size: 12, weight: .bold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if model.state.showDivider {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.14))
-                        .frame(width: 1, height: 13)
+                AppIcon(symbol: model.state == .done ? .connected : .undo, size: .small)
+                    .foregroundStyle(UITheme.success)
+            }
+            Text(model.state.compactTitle)
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .layoutPriority(1)
+                .accessibilityLabel(model.state.title)
+            Spacer(minLength: 0)
+            if model.state == .done {
+                Rectangle().fill(UITheme.border).frame(width: 1, height: 14)
+                Button("撤回") {
+                    let action = model.undoAction
+                    model.undoAction = nil
+                    action?()
                 }
-                if model.state.showAction {
-                    Button(model.state.actionTitle) {
-                        model.undoAction?()
-                    }
-                    .buttonStyle(CapsuleActionButtonStyle())
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(UITheme.accent)
+                .frame(height: 26)
+                .contentShape(Rectangle())
+            } else if model.state.isLoading, model.cancelAction != nil {
+                Button {
+                    let action = model.cancelAction
+                    model.cancelAction = nil
+                    action?()
+                } label: {
+                    AppIcon(symbol: .close, size: .small)
+                        .foregroundStyle(UITheme.secondary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("停止润色")
+                .help("停止润色，保留原文")
+            } else {
+                TypemoreMark(size: 18, badge: false)
             }
         }
+        .foregroundStyle(UITheme.text)
         .padding(.horizontal, 10)
-        .frame(width: 132, height: 30)
-        .foregroundStyle(foregroundColor)
-        .background(background)
+        .frame(width: CapsuleLayout.width, height: CapsuleLayout.height)
+        .modifier(FloatingSurface(
+            cornerRadius: CapsuleLayout.height / 2,
+            shadowPadding: CapsuleLayout.shadowPadding
+        ))
     }
-
-    private var foregroundColor: Color {
-        Color(red: 0.92, green: 1.0, blue: 0.95)
-    }
-
-    private var background: some View {
-        TimelineView(.animation) { context in
-            let pulse = model.state.isLoading ? breathingProgress(context.date.timeIntervalSinceReferenceDate) : 0
-            RoundedRectangle(cornerRadius: 999, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.07, green: 0.1, blue: 0.09).opacity(0.99),
-                            Color(red: 0.02, green: 0.04, blue: 0.035).opacity(0.97)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 999, style: .continuous)
-                        .stroke(Color.typemoreGreen.opacity(model.state.isLoading ? 0.22 + pulse * 0.16 : 0.18), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.34), radius: 18, y: 10)
-                .shadow(color: .typemoreGreen.opacity(model.state.isLoading ? 0.08 + pulse * 0.14 : 0), radius: 18 + pulse * 10)
-        }
-    }
-
-    private func breathingProgress(_ time: TimeInterval) -> Double {
-        (sin(time * .pi * 2 / 1.45) + 1) / 2
-    }
-}
-
-struct BreathingOrb: View {
-    var body: some View {
-        TimelineView(.animation) { context in
-            let pulse = (sin(context.date.timeIntervalSinceReferenceDate * .pi * 2 / 1.15) + 1) / 2
-            Circle()
-                .fill(Color.typemoreGreen)
-                .frame(width: 7, height: 7)
-                .scaleEffect(0.86 + pulse * 0.18)
-                .opacity(0.62 + pulse * 0.38)
-                .shadow(color: .typemoreGreen.opacity(0.35 + pulse * 0.35), radius: 5 + pulse * 6)
-        }
-        .frame(width: 9, height: 10)
-    }
-}
-
-struct LoadingDots: View {
-    private let cycle: TimeInterval = 1.32
-    private let delays: [TimeInterval] = [0, 0.22, 0.44]
-
-    var body: some View {
-        TimelineView(.animation) { context in
-            HStack(alignment: .bottom, spacing: 3) {
-                ForEach(0..<3, id: \.self) { index in
-                    let progress = localProgress(context.date.timeIntervalSinceReferenceDate, delay: delays[index])
-                    Circle()
-                        .fill(Color.typemoreGreen)
-                        .frame(width: 3, height: 3)
-                        .opacity(opacity(progress))
-                        .offset(y: yOffset(progress))
-                        .scaleEffect(scale(progress))
-                }
-            }
-            .frame(width: 15, height: 10)
-        }
-    }
-
-    private func localProgress(_ time: TimeInterval, delay: TimeInterval) -> Double {
-        let shifted = time - delay
-        let remainder = shifted - floor(shifted / cycle) * cycle
-        return remainder / cycle
-    }
-
-    private func yOffset(_ progress: Double) -> CGFloat {
-        if progress < 0.10 { return CGFloat(-3.5 * (progress / 0.10)) }
-        if progress < 0.20 { return CGFloat(-3.5 * (1 - (progress - 0.10) / 0.10)) }
-        return 0
-    }
-
-    private func opacity(_ progress: Double) -> Double {
-        progress < 0.30 ? 1.0 : 0.34
-    }
-
-    private func scale(_ progress: Double) -> CGFloat {
-        progress < 0.20 ? 1.08 : 1
-    }
-}
-
-struct CapsuleActionButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 12, weight: .bold))
-            .padding(.horizontal, 8)
-            .frame(height: 22)
-            .background(Color.typemoreGreen.opacity(configuration.isPressed ? 0.2 : 0.1))
-            .foregroundStyle(Color.typemoreGreen)
-            .clipShape(RoundedRectangle(cornerRadius: 999, style: .continuous))
-    }
-}
-
-private extension Color {
-    static let typemoreGreen = Color(red: 0.27, green: 0.96, blue: 0.61)
 }
