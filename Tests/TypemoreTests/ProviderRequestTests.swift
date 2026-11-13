@@ -93,6 +93,25 @@ final class ProviderRequestTests: XCTestCase {
 }
 
 extension ProviderRequestTests {
+    func testSelectedLibraryStyleIsSentWithoutOtherStyles() async throws {
+        var settings = AppSettings.defaults.sanitized()
+        settings.provider = .compatible
+        settings.endpoint = "https://typemore.test/v1"; settings.model = "test-model"; settings.apiKey = "fake-test-key"
+        let selected = WritingStyle(name: "简短直接", instructions: "这是当前风格的独立规则：句子简短，保留条件。")
+        let other = WritingStyle(name: "其他风格", instructions: "这段未选择的规则不应发送给模型。")
+        settings.writingStyles += [selected, other]
+        settings.selectWritingStyle(selected.id)
+        ProviderStub.handler = { request in
+            let body = try ProviderStub.body(request)
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            let payload = messages.compactMap { $0["content"] }.joined(separator: "\n")
+            XCTAssertTrue(payload.contains(selected.instructions))
+            XCTAssertFalse(payload.contains(other.instructions))
+            return (200, Data(#"{"choices":[{"message":{"content":"我们可以先尝试，再决定是否继续。"},"finish_reason":"stop"}]}"#.utf8))
+        }
+        _ = try await RewriteService().rewrite("我们可以先试试看，再决定要不要继续。", settings: settings)
+    }
+
     func testStreamingCompatibilityAPICollectsOnlyFinalText() async throws {
         var settings = AppSettings.defaults
         settings.provider = .bailian; settings.endpoint = "https://typemore.test/v1"; settings.model = "test-model"; settings.apiKey = "fake-test-key"

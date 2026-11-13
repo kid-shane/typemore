@@ -16,7 +16,7 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
     private var rewriteTask: Task<Void, Never>?
     private var rewriteOperationID: UUID?
     private var rewritePhase: RewritePhase = .reading
-    private var activeSession: ActiveSession?
+    private var activeSession: RewriteSession?
     private var cancellables = Set<AnyCancellable>()
     private var reopenObserver: NSObjectProtocol?
     private let debugEnabled = ProcessInfo.processInfo.environment["TYPEMORE_DEBUG"] == "1"
@@ -187,7 +187,8 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
                 showRewriteLoading("润色中", operationID: operationID)
 
                 let rewriteStartedAt = Date()
-                let rewritten = try await rewriteService.rewrite(capture, settings: settingsStore.settings) { @MainActor [weak self] progress in
+                let settings = settingsStore.settings
+                let rewritten = try await rewriteService.rewrite(capture, settings: settings) { @MainActor [weak self] progress in
                     if progress.total > 1 {
                         self?.showRewriteLoading("润色中 \(progress.completed)/\(progress.total)", operationID: operationID)
                     }
@@ -209,12 +210,9 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
                     }
                 )
                 perfLog("paste: \(formatDuration(since: pasteStartedAt))")
-                activeSession = ActiveSession(capture: capture)
-
-                capsule.showDone { [weak self] in
-                    Task { @MainActor in await self?.undoLastReplacement() }
-                }
-                capsule.hide()
+                activeSession = textService.recordReplacement(capture: capture, text: rewritten,
+                                                             styleID: settings.selectedWritingStyle.id)
+                showCompletedRewrite()
                 perfLog("total: \(formatDuration(since: totalStartedAt))")
                 TMLog.write("flow done total=\(formatDuration(since: totalStartedAt))")
             } catch {
@@ -247,6 +245,61 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
         // 等读取/剪贴板与后端清理完成再释放 busy，避免下一次触发与旧任务交叉写回。
     }
 
+    private func showCompletedRewrite() {
+        guard let session = activeSession else { return }
+        capsule.showDone(styles: settingsStore.settings.writingStyles, selectedStyleID: session.styleID,
+                         changeStyle: { [weak self] id in self?.rewriteWithStyle(id) }) { [weak self] in
+            Task { @MainActor in await self?.undoLastReplacement() }
+        }
+        capsule.hide()
+    }
+
+    private func rewriteWithStyle(_ styleID: UUID) {
+        guard !isProcessing, let session = activeSession else { return }
+        var settings = settingsStore.settings
+        guard settings.writingStyles.contains(where: { $0.id == styleID }) else { return }
+        settings.selectWritingStyle(styleID)
+        do { try settingsStore.save(settings) }
+        catch { showErrorToast(error.localizedDescription); return }
+
+        isProcessing = true
+        let operationID = UUID()
+        rewriteOperationID = operationID
+        rewritePhase = .rewriting
+        toast.dismiss()
+        showRewriteLoading("润色中", operationID: operationID)
+        rewriteTask = Task { @MainActor in
+            defer {
+                if rewriteOperationID == operationID {
+                    rewriteTask = nil
+                    rewriteOperationID = nil
+                    isProcessing = false
+                }
+            }
+            do {
+                // 每种风格均使用最初的原文与上下文，连续切换时保持同一份输入。
+                let rewritten = try await rewriteService.rewrite(session.capture, settings: settings) { @MainActor [weak self] progress in
+                    if progress.total > 1 {
+                        self?.showRewriteLoading("润色中 \(progress.completed)/\(progress.total)", operationID: operationID)
+                    }
+                }
+                try Task.checkCancellation()
+                try await textService.replace(rewritten, in: session) { [weak self] in
+                    self?.rewritePhase = .applying
+                    self?.capsule.showLoading("润色中")
+                }
+                activeSession = session.replacing(with: rewritten, styleID: styleID)
+                showCompletedRewrite()
+            } catch {
+                guard rewriteOperationID == operationID else { return }
+                showCompletedRewrite()
+                if !(error is CancellationError) && !Task.isCancelled {
+                    showErrorToast(error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func undoLastReplacement() async {
         guard !isProcessing, let activeSession else { return }
         isProcessing = true
@@ -254,7 +307,7 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
         self.activeSession = nil
         capsule.showLoading("撤回中")
         do {
-            try await textService.undo(in: activeSession.sourceBundleID)
+            try await textService.replace(activeSession.capture.text, in: activeSession)
             capsule.showUndone()
         } catch {
             let message = error.localizedDescription
@@ -331,16 +384,4 @@ final class TypemoreApp: NSObject, NSApplicationDelegate {
 
 private enum RewritePhase {
     case reading, rewriting, applying, cancelled
-}
-
-private struct ActiveSession {
-    let sessionID: Int
-    let sourceBundleID: String?
-    let previousClipboard: ClipboardSnapshot
-
-    init(capture: CaptureResult) {
-        self.sessionID = capture.sessionID
-        self.sourceBundleID = capture.sourceBundleID
-        self.previousClipboard = capture.previousClipboard
-    }
 }

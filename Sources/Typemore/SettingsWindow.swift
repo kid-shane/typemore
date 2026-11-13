@@ -304,53 +304,8 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder private var writingPage: some View {
-        HStack(spacing: 12) {
-            styleOption("默认表达", mode: .clear, icon: .defaultStyle)
-            styleOption("自定义表达", mode: .custom, icon: .customStyle)
-        }
-        if draft.defaultMode == .custom {
-            SettingsSection("表达偏好", icon: .edit) {
-                ZStack(alignment: .topLeading) {
-                    if draft.customStyle.isEmpty {
-                        Text("例如：自然简洁，先说结论，适当分点。")
-                            .foregroundStyle(UITheme.secondary)
-                            .padding(12)
-                    }
-                    TextEditor(text: $draft.customStyle)
-                        .scrollContentBackground(.hidden)
-                        .padding(8)
-                        .accessibilityLabel("表达偏好")
-                }
-                .font(.system(size: 13))
-                .foregroundStyle(UITheme.text)
-                .frame(minHeight: 240)
-                .background(UITheme.field)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(UITheme.border, lineWidth: 1))
-            }
-        }
-    }
-
-    private func styleOption(_ title: String, mode: RewriteMode, icon: AppSymbol) -> some View {
-        Button { draft.defaultMode = mode } label: {
-            HStack(spacing: 10) {
-                AppIcon(symbol: icon)
-                Text(title)
-                Spacer()
-                AppIcon(symbol: draft.defaultMode == mode ? .connected : .idle)
-                    .foregroundStyle(draft.defaultMode == mode ? UITheme.accent : UITheme.secondary)
-            }
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(UITheme.text)
-            .padding(16)
-            .frame(maxWidth: .infinity)
-            .background(draft.defaultMode == mode ? UITheme.selection : UITheme.field)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(UITheme.border, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(draft.defaultMode == mode ? .isSelected : [])
+    private var writingPage: some View {
+        WritingStyleView(draft: $draft)
     }
 
     @ViewBuilder private var servicePage: some View {
@@ -416,7 +371,7 @@ struct SettingsView: View {
                 Button("保存") { save() }
                     .buttonStyle(SettingsButtonStyle(primary: true, minimumWidth: 84))
                     .keyboardShortcut("s", modifiers: .command)
-                    .disabled(!hasChanges || invalidChord || recorder.isRecording)
+                    .disabled(!hasChanges || invalidChord || draft.hasInvalidWritingStyle || recorder.isRecording)
             }
             .font(.system(size: 12))
             .padding(.horizontal, 36)

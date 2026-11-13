@@ -166,6 +166,8 @@ struct AppSettings: Codable, Equatable {
     var activeConnectionID: UUID?
     var cliPath = ""
     var workspaceID = ""
+    var writingStyles: [WritingStyle] = []
+    var selectedWritingStyleID: UUID?
 
     private static let previousDefaultCustomStyle = "在严格保留原意的前提下，帮我把表达改得更清晰、准确、自然。可以根据上下文修正明显错别字、漏字、语病和不顺的表达。面对长段文本时，优先提升阅读体验：理顺逻辑、拆分长句、适当分段；如果信息点较多，可以加入项目符号或编号，让重点更清楚。不要过度扩写，不要改变事实、立场、语气强弱和关键信息。"
 
@@ -250,6 +252,7 @@ struct AppSettings: Codable, Equatable {
         if case .chord(let chord) = copy.rewriteTrigger, !chord.hasModifier {
             copy.rewriteTrigger = .default
         }
+        copy.prepareWritingStyles()
         return copy
     }
 
@@ -266,6 +269,7 @@ struct AppSettings: Codable, Equatable {
         case systemPrompt
         case rewriteTrigger
         case connections, activeConnectionID, cliPath, workspaceID
+        case writingStyles, selectedWritingStyleID
     }
 
     init(
@@ -324,6 +328,8 @@ struct AppSettings: Codable, Equatable {
         self.activeConnectionID = try container.decodeIfPresent(UUID.self, forKey: .activeConnectionID)
         self.cliPath = try container.decodeIfPresent(String.self, forKey: .cliPath) ?? ""
         self.workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID) ?? ""
+        self.writingStyles = try container.decodeIfPresent([WritingStyle].self, forKey: .writingStyles) ?? []
+        self.selectedWritingStyleID = try container.decodeIfPresent(UUID.self, forKey: .selectedWritingStyleID)
     }
 
     /// API Key 不写入 settings.json，改由 Keychain 保存。
@@ -343,6 +349,8 @@ struct AppSettings: Codable, Equatable {
         try container.encodeIfPresent(activeConnectionID, forKey: .activeConnectionID)
         try container.encode(cliPath, forKey: .cliPath)
         try container.encode(workspaceID, forKey: .workspaceID)
+        try container.encode(writingStyles, forKey: .writingStyles)
+        try container.encodeIfPresent(selectedWritingStyleID, forKey: .selectedWritingStyleID)
     }
 }
 
@@ -379,7 +387,7 @@ final class SettingsStore: ObservableObject {
     }
 
     func load() -> AppSettings {
-        var loaded = AppSettings.defaults
+        var loaded = AppSettings.defaults.sanitized()
         for url in [primaryFileURL] + (legacyFileURL.map { [$0] } ?? []) + [fallbackFileURL] {
             guard let data = try? Data(contentsOf: url),
                   let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else { continue }

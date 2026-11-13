@@ -72,6 +72,7 @@ final class ModelConnectionTests: XCTestCase {
         let store = SettingsStore(fileURL: file, secretReader: { _ in nil }, secretWriter: { _, _ in throw ModelServiceError.message("钥匙串拒绝写入") })
         let original = store.settings
         var changed = original
+        changed.addConnection(.compatible)
         changed.model = "changed-model"
         changed.apiKey = "a-test-key"
         XCTAssertThrowsError(try store.save(changed))

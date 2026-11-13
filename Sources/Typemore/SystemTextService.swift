@@ -54,6 +54,7 @@ struct CaptureResult {
     let replacementRange: NSRange?
     let sourceBundleID: String?
     let previousClipboard: ClipboardSnapshot
+    var targetElement: AXUIElement? = nil
 }
 
 struct ClipboardSnapshot {
@@ -113,7 +114,8 @@ final class SystemTextService {
             focusedText: focusedText,
             sessionID: sessionID,
             sourceBundleID: sourceBundleID,
-            previousClipboard: previousClipboard
+            previousClipboard: previousClipboard,
+            targetElement: focusedDiag.element
         ) {
             TMLog.write("capture#\(sessionID) ax-path: targetLen=\(capture.text.count) ctxBefore=\(capture.contextBefore.count) ctxAfter=\(capture.contextAfter.count) range=\(String(describing: capture.replacementRange))")
             onCopySent(sessionID)
@@ -169,7 +171,8 @@ final class SystemTextService {
             contextAfter: "",
             replacementRange: nil,
             sourceBundleID: sourceBundleID,
-            previousClipboard: previousClipboard
+            previousClipboard: previousClipboard,
+            targetElement: focusedDiag.element
         )
     }
 
@@ -223,6 +226,51 @@ final class SystemTextService {
             TMLog.write("undo: cmd+z failed: \(error.localizedDescription)")
             throw accessibilityError(error)
         }
+    }
+
+    func recordReplacement(capture: CaptureResult, text: String, styleID: UUID) -> RewriteSession {
+        var session = RewriteSession(capture: capture, replacementText: text, styleID: styleID)
+        if session.replacementRange == nil, let element = capture.targetElement,
+           let selection = selectedRange(in: element) {
+            let length = (text as NSString).length
+            if selection.length == length {
+                session.replacementRange = selection
+            } else if selection.length == 0, selection.location >= length {
+                session.replacementRange = NSRange(location: selection.location - length, length: length)
+            }
+        }
+        return session
+    }
+
+    func replace(_ text: String, in session: RewriteSession, onWillCommit: (() -> Void)? = nil) async throws {
+        if let bundleID = session.capture.sourceBundleID { try await activateIfNeeded(bundleID: bundleID) }
+        try Task.checkCancellation()
+        let diagnostic = readFocusedTextDiagnostic()
+        if let target = session.capture.targetElement {
+            guard let focused = diagnostic.element, CFEqual(target, focused) else {
+                throw TypemoreError.rewriteTargetChanged
+            }
+        }
+        guard let range = session.replacementRange else { throw TypemoreError.rewriteTargetChanged }
+        if let field = diagnostic.focused, !session.matches(field.text) {
+            throw TypemoreError.rewriteTargetChanged
+        }
+        try setFocusedSelectedRange(range)
+        let selected = try await captureText { _ in }
+        guard selected.text == session.replacementText.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            throw TypemoreError.rewriteTargetChanged
+        }
+        try await paste(text, into: session.capture.sourceBundleID, replacementRange: range,
+                        previousClipboard: ClipboardSnapshot(pasteboard: .general), onWillCommit: onWillCommit)
+    }
+
+    private func selectedRange(in element: AXUIElement) -> NSRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(value as! AXValue, .cfRange, &range), range.location >= 0 else { return nil }
+        return NSRange(location: range.location, length: range.length)
     }
 
     func openAccessibilitySettings() {
@@ -463,6 +511,7 @@ final class SystemTextService {
         diag.focusLookup = "systemWide=\(describeAXError(systemWideStatus));focusedApp=\(describeOptionalAXError(focusedAppStatus));focusedAppElement=\(describeOptionalAXError(focusedAppElementStatus));appPID=\(describeOptionalAXError(appPIDStatus))"
 
         guard let element = focusedAX else { return diag }
+        diag.element = element
         diag.focusedOK = true
 
         var roleValue: CFTypeRef?
@@ -529,7 +578,8 @@ final class SystemTextService {
         focusedText: FocusedText,
         sessionID: Int,
         sourceBundleID: String?,
-        previousClipboard: ClipboardSnapshot
+        previousClipboard: ClipboardSnapshot,
+        targetElement: AXUIElement?
     ) -> CaptureResult? {
         let nsText = focusedText.text as NSString
         let textLength = nsText.length
@@ -561,7 +611,8 @@ final class SystemTextService {
             contextAfter: nsText.substring(with: contextAfterRange),
             replacementRange: targetRange,
             sourceBundleID: sourceBundleID,
-            previousClipboard: previousClipboard
+            previousClipboard: previousClipboard,
+            targetElement: targetElement
         )
     }
 
@@ -677,6 +728,7 @@ private struct FocusedText {
 }
 
 private struct FocusedDiagnostic {
+    var element: AXUIElement?
     var focusedOK = false
     var focusedSource: String?
     var frontmostBundleID: String?
@@ -710,6 +762,7 @@ enum TypemoreError: LocalizedError {
     case inputTooLong(Int)
     case invalidModelResponse
     case reasoningOnlyModelResponse
+    case rewriteTargetChanged
     var errorDescription: String? {
         switch self {
         case .noSelectedText: return "没有检测到选中文字"
@@ -718,6 +771,7 @@ enum TypemoreError: LocalizedError {
         case .inputTooLong(let maxCharacters): return "当前输入框内容超过 \(maxCharacters) 字，请手动选中要改写的部分"
         case .invalidModelResponse: return "模型没有返回可用文本"
         case .reasoningOnlyModelResponse: return "模型未返回正文，请关闭思考模式后重试"
+        case .rewriteTargetChanged: return "原来的文字或输入位置已变化，请重新选中文字后润色"
         }
     }
 }
