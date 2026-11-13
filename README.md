@@ -78,7 +78,7 @@ Typemore 当前只支持 macOS。它使用 Swift、AppKit、SwiftUI、CGEventTap
 
 1. 下载 `Typemore-<版本>-universal.dmg`（同时支持 Apple Silicon 和 Intel）。
 2. 打开 DMG，把 `Typemore.app` 拖到 `Applications`。
-3. 双击 `Typemore.app` 启动。v0.1.9 的正式安装包已完成 Developer ID 签名和 Apple 公证。
+3. 双击 `Typemore.app` 启动。各版本安装包的签名和公证状态见对应的 Release 说明。
 4. 在系统设置里为 Typemore 开启「辅助功能」和「输入监控」权限。
 
 ## 快速开始
