@@ -23,6 +23,7 @@ Typemore 是一个轻量级 macOS 写作助手。你可以在任意应用中选�
 - 支持从胶囊里的撤回图标恢复最初原文。
 - 支持使用 ChatGPT 账号、连接官方豆包 CLI，或配置自己的模型服务 API Key。
 - 提供主流服务商预设、可用模型列表和真实连接试用；支持保存、切换和移除多份连接。
+- 凭据访问异常时可在应用内恢复连接，完成 macOS 系统验证后自动重试。
 - 设置保存在本机，不依赖 Typemore 自建后端。
 
 ## 工作方式
@@ -108,6 +109,8 @@ Typemore 当前只支持 macOS。它使用 Swift、AppKit、SwiftUI、CGEventTap
 
 API Key 与 ChatGPT OAuth 凭据保存在本机 macOS Keychain；模型地址、连接名称和文风保存在 `Application Support/Typemore/Public`。首次启动会读取旧配置，之后独立保存。豆包登录与任务记录由豆包 CLI 管理。安装包不携带用户的账号或凭据。
 
+如果出现钥匙串鉴权或解锁错误，可在「模型服务」点击「恢复连接」，确认后在 macOS 系统窗口中完成验证。恢复会锁定并重新解锁默认钥匙串，其他应用也可能请求解锁；若取消系统验证，钥匙串会保持锁定，可以再次恢复。Typemore 不读取或保存 Mac 登录密码。验证完成后会自动重试刚才的操作，并保留连接与表达风格设置。
+
 相关官方文档：[ChatGPT 账号接入](https://developers.openai.com/siwc/token-sharing-open-source)、[豆包 CLI](https://www.npmjs.com/package/@bytedance/doubao-cli)、[方舟 API](https://docs.volcengine.com/docs/ark/chat-api?lang=zh)。
 
 ## macOS 权限
@@ -176,7 +179,7 @@ scripts/benchmark-rewrite.py --repeat 3
 GitHub Releases 提供经过 Developer ID 签名和 Apple 公证的通用安装包。发布者使用 macOS 钥匙串中保存的证书与公证凭据运行：
 
 ```bash
-UNIVERSAL=1 VERSION=0.1.9 BUILD_NUMBER=2026111303 \
+UNIVERSAL=1 VERSION=0.1.10 BUILD_NUMBER=2026111401 \
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 NOTARIZE=1 NOTARY_PROFILE="your-notary-profile" \
 bash scripts/package-local-app.sh

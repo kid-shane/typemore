@@ -362,8 +362,10 @@ final class SettingsStore: ObservableObject {
     private let legacyFileURL: URL?
 
     @Published private(set) var credentialError = ""
+    @Published private(set) var credentialFailure: KeychainStoreError?
     private let secretReader: (String) throws -> String?
     private let secretWriter: (String, String) throws -> Void
+    private var credentialRetryReader: (() throws -> String)?
 
     init(fileURL: URL? = nil,
          secretReader: @escaping (String) throws -> String? = KeychainStore.readSecret,
@@ -386,6 +388,17 @@ final class SettingsStore: ObservableObject {
         return try secretReader(connection.credentialAccount) ?? ""
     }
 
+    func reloadAPIKey(for connection: ModelConnection) throws -> String {
+        guard connection.provider.requiresAPIKey else { return "" }
+        let key: String
+        if connection.id == settings.activeConnectionID, let reader = credentialRetryReader { key = try reader() }
+        else { key = try secretReader(connection.credentialAccount) ?? "" }
+        credentialError = ""
+        credentialFailure = nil
+        credentialRetryReader = nil
+        return key
+    }
+
     func load() -> AppSettings {
         var loaded = AppSettings.defaults.sanitized()
         for url in [primaryFileURL] + (legacyFileURL.map { [$0] } ?? []) + [fallbackFileURL] {
@@ -398,12 +411,22 @@ final class SettingsStore: ObservableObject {
         let legacyAccount = "api-key-\(loaded.provider.rawValue)"
         loaded.ensureConnection()
         if loaded.provider.requiresAPIKey {
+            let reader = secretReader
+            let account = loaded.credentialAccount
+            let fallbackKey = loaded.apiKey
+            let read: () throws -> String = {
+                if let key = try reader(account) { return key }
+                if wasLegacy { return try reader(legacyAccount) ?? reader("default-api-key") ?? fallbackKey }
+                return fallbackKey
+            }
             do {
-                if let key = try secretReader(loaded.credentialAccount) { loaded.apiKey = key }
-                else if wasLegacy {
-                    loaded.apiKey = try secretReader(legacyAccount) ?? secretReader("default-api-key") ?? loaded.apiKey
-                }
-            } catch { credentialError = error.localizedDescription }
+                loaded.apiKey = try read()
+                credentialRetryReader = nil
+            } catch {
+                credentialError = error.localizedDescription
+                credentialFailure = error as? KeychainStoreError
+                credentialRetryReader = read
+            }
         }
         return loaded
     }
@@ -434,6 +457,8 @@ final class SettingsStore: ObservableObject {
             throw error
         }
         credentialError = ""
+        credentialFailure = nil
+        credentialRetryReader = nil
         settings = sanitized
     }
 

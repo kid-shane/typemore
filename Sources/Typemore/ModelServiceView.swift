@@ -10,16 +10,49 @@ final class ModelConnectionController: ObservableObject {
     @Published var qrImage: NSImage?
     @Published var busy = false
     @Published var failed = false
+    @Published var keychainError: KeychainStoreError?
+    @Published private(set) var recoveringCredentials = false
     private var task: Task<Void, Never>?
+    private var credentialRetry: (@MainActor () async throws -> Void)?
+    var hasCredentialRetry: Bool { credentialRetry != nil }
     func cancel() { task?.cancel(); task = nil; busy = false; qrImage = nil }
-    func reset() { cancel(); models = []; message = ""; result = ""; email = ""; failed = false }
+    func reset() { cancel(); models = []; message = ""; result = ""; email = ""; failed = false; keychainError = nil; credentialRetry = nil }
     func run(_ work: @escaping @MainActor () async throws -> Void) {
-        cancel(); busy = true; failed = false; message = ""; result = ""
+        start(work, retry: work)
+    }
+    func retryCredentialOperation() {
+        guard let work = credentialRetry else { return }
+        run(work)
+    }
+    func recoverCredentials(using reauthenticate: @escaping () async throws -> Void = KeychainStore.reauthenticate,
+                            retry: (@MainActor () async throws -> Void)? = nil) {
+        guard !recoveringCredentials, let work = retry ?? credentialRetry else { return }
+        start({
+            self.recoveringCredentials = true
+            defer { self.recoveringCredentials = false }
+            self.message = "请在 macOS 系统窗口中完成验证…"
+            try Task.checkCancellation()
+            try await reauthenticate()
+            try Task.checkCancellation()
+            self.message = "正在恢复连接…"
+            try await work()
+        }, retry: work)
+    }
+    private func start(_ work: @escaping @MainActor () async throws -> Void,
+                       retry: @escaping @MainActor () async throws -> Void) {
+        cancel(); busy = true; failed = false; message = ""; result = ""; keychainError = nil
+        credentialRetry = nil
         task = Task {
             defer { if !Task.isCancelled { busy = false; qrImage = nil } }
             do { try await work() }
             catch is CancellationError { }
-            catch { if !Task.isCancelled { failed = true; message = error.localizedDescription } }
+            catch {
+                if !Task.isCancelled {
+                    failed = true; message = error.localizedDescription
+                    keychainError = error as? KeychainStoreError
+                    if keychainError != nil { credentialRetry = retry }
+                }
+            }
         }
     }
     func showQR(_ output: String) {
@@ -34,7 +67,7 @@ final class ModelConnectionController: ObservableObject {
 }
 
 enum ModelServiceDialog {
-    case connections, add, models, account, remove, disconnect
+    case connections, add, models, account, remove, disconnect, recoverCredentials
 }
 
 struct ModelServiceView: View {
@@ -57,6 +90,7 @@ struct ModelServiceView: View {
                     .buttonStyle(SettingsButtonStyle())
                     .accessibilityLabel("切换模型连接")
                     .accessibilityValue(draft.serviceName)
+                    .disabled(controller.recoveringCredentials)
                 }
                 if draft.provider == .chatgpt { chatGPTAccount }
                 else if draft.provider == .doubao { doubaoAccount }
@@ -85,7 +119,7 @@ struct ModelServiceView: View {
                 }
             }
             utilities
-            if !store.credentialError.isEmpty {
+            if !store.credentialError.isEmpty && draft.activeConnectionID == store.settings.activeConnectionID {
                 status(store.credentialError, failed: true)
             }
             if controller.busy || !controller.message.isEmpty {
@@ -93,9 +127,22 @@ struct ModelServiceView: View {
                     if controller.busy { ProgressView().controlSize(.small).scaleEffect(0.75).frame(width: 14, height: 14) }
                     status(controller.message.isEmpty ? "正在连接…" : controller.message, failed: controller.failed)
                     Spacer(minLength: 0)
-                    if controller.busy {
+                    if controller.busy && !controller.recoveringCredentials {
                         Button("停止") { controller.cancel(); controller.message = "已停止当前操作" }
                             .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(UITheme.secondary)
+                    }
+                }
+            }
+            if let error = credentialFailure,
+               let suggestion = error.recoverySuggestion {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(suggestion).font(.system(size: 12)).foregroundStyle(UITheme.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 12) {
+                        Button("恢复连接") { dialog = .recoverCredentials }
+                            .buttonStyle(SettingsButtonStyle(primary: true)).disabled(controller.busy)
+                        Button("重试") { retryCredentials() }
+                            .buttonStyle(SettingsButtonStyle()).disabled(controller.busy)
                     }
                 }
             }
@@ -109,6 +156,10 @@ struct ModelServiceView: View {
         .onChange(of: draft.apiKey) { _ in if draft.provider.requiresAPIKey { controller.reset() } }
         .onAppear { loadIdentity() }
         .onDisappear { controller.cancel(); dialog = nil }
+    }
+
+    private var credentialFailure: KeychainStoreError? {
+        controller.keychainError ?? (draft.activeConnectionID == store.settings.activeConnectionID ? store.credentialFailure : nil)
     }
 
     private var needsCredential: Bool {
@@ -333,6 +384,7 @@ struct ModelServiceView: View {
                                            refresh: { fetchModels() })
                     case .account: accountDialog
                     case .remove, .disconnect: confirmationContent(dialog)
+                    case .recoverCredentials: recoveryContent
                     }
                 }
                 .foregroundStyle(UITheme.text).padding(24).frame(width: dialog == .add ? 496 : 448)
@@ -353,6 +405,7 @@ struct ModelServiceView: View {
         case .account: return "ChatGPT 账号"
         case .remove: return "移除这个连接？"
         case .disconnect: return "断开 ChatGPT？"
+        case .recoverCredentials: return "恢复已保存的连接？"
         }
     }
 
@@ -481,6 +534,37 @@ struct ModelServiceView: View {
         }
     }
 
+    private var recoveryContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("macOS 会锁定并重新解锁默认钥匙串，其他应用也可能请求解锁。请在系统窗口中输入 Mac 登录密码。若取消系统验证，钥匙串会保持锁定，可再次恢复。Typemore 不读取或保存此密码。完成后会自动重试刚才的操作。")
+                .font(.system(size: 13)).foregroundStyle(UITheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("取消") { dialog = nil }.buttonStyle(SettingsButtonStyle())
+                Button("继续恢复") {
+                    dialog = nil
+                    NSApp.activate(ignoringOtherApps: true)
+                    if controller.hasCredentialRetry { controller.recoverCredentials() }
+                    else { controller.recoverCredentials(retry: reloadSavedAPIKey) }
+                }.buttonStyle(SettingsButtonStyle(primary: true))
+            }
+        }
+    }
+
+    private func retryCredentials() {
+        if controller.hasCredentialRetry { controller.retryCredentialOperation() }
+        else if draft.provider == .chatgpt { loadIdentity() }
+        else { controller.run { try await reloadSavedAPIKey() } }
+    }
+
+    @MainActor private func reloadSavedAPIKey() async throws {
+        guard let id = draft.activeConnectionID, draft.provider.requiresAPIKey else { return }
+        let key = try store.reloadAPIKey(for: ModelConnection(settings: draft, id: id))
+        if draft.apiKey.isEmpty { draft.apiKey = key }
+        controller.message = "已恢复凭据访问"
+    }
+
     private func add(_ provider: Provider) {
         apiKeys[draft.credentialAccount] = draft.apiKey
         draft.addConnection(provider)
@@ -490,10 +574,10 @@ struct ModelServiceView: View {
         guard connection.id != draft.activeConnectionID else { return }
         apiKeys[draft.credentialAccount] = draft.apiKey
         draft.rememberConnection()
-        do {
+        controller.run {
             let key = try apiKeys[connection.credentialAccount] ?? store.apiKey(for: connection)
             draft.selectConnection(connection, key: key)
-        } catch { controller.failed = true; controller.message = error.localizedDescription }
+        }
     }
     private func removeConnection() {
         guard let id = draft.activeConnectionID else { return }
@@ -517,7 +601,10 @@ struct ModelServiceView: View {
     }
     private func loadIdentity() {
         guard draft.provider == .chatgpt, let id = draft.activeConnectionID else { return }
-        controller.run { controller.email = try await ChatGPTAuth.shared.email(connectionID: id) ?? "" }
+        controller.run {
+            controller.email = try await ChatGPTAuth.shared.email(connectionID: id) ?? ""
+            controller.message = controller.email.isEmpty ? "请连接 ChatGPT 账号" : ""
+        }
     }
     private func updateModels(_ values: [ServiceModel]) {
         controller.models = values

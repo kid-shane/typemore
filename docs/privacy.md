@@ -8,4 +8,6 @@ Doubao connections invoke the separately installed official Doubao CLI. Its logi
 
 Typemore does not run its own model backend, collect analytics, or bundle user credentials. API keys and ChatGPT OAuth credentials are stored in macOS Keychain. Non-secret connection settings, writing preferences, and shortcuts are stored locally in Application Support under Typemore/Public. Legacy settings are read for migration and kept unchanged. A Keychain write failure is reported and does not mark the configuration as saved.
 
+When Keychain authentication fails, users can choose to recover the connection in the app. After confirmation, macOS locks and unlocks the default keychain and presents its own password verification dialog. Other apps may also request an unlock. If verification is canceled, the keychain remains locked until it is unlocked again. Typemore does not receive or store the Mac login password. After verification, the app retries the failed operation and checks whether the saved credentials are accessible.
+
 Typemore prefers the macOS Accessibility API to read and replace text. Where required, it temporarily uses the clipboard to copy or paste, then restores the previous clipboard contents. Third-party clipboard managers may record intermediate content. Avoid triggering Typemore in sensitive input fields.

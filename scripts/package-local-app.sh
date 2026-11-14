@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Typemore"
 BUNDLE_ID="com.typemore.local"
-VERSION="${VERSION:-${GITHUB_REF_NAME:-0.1.8}}"
+VERSION="${VERSION:-${GITHUB_REF_NAME:-0.1.10}}"
 VERSION="${VERSION#v}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 BUILD_DIR="$ROOT_DIR/.build/arm64-apple-macosx/release"
